@@ -7,10 +7,13 @@ import {
   ExamDatabase,
   QuestionGrade,
   QuestionItem,
+  QuestionMediaItem,
+  QuestionMediaLayout,
   RubricCriterion,
   StudentRecord,
   StudentSubmission
 } from '../types/exam';
+import { blobToDataUrl, compressImageFile } from '../utils/imageCompression';
 
 export const SUPABASE_PROJECT_URL =
   import.meta.env.VITE_SUPABASE_URL || 'https://vxagfhbaikxlbyagxnga.supabase.co';
@@ -41,6 +44,65 @@ export function formatSupabaseError(err: unknown): string {
   return raw;
 }
 
+function parseMediaLayout(val: unknown): QuestionMediaLayout {
+  if (val === 'side' || val === 'compare_ab' || val === 'gallery' || val === 'top') {
+    return val;
+  }
+  return 'top';
+}
+
+function parseMediaItems(val: unknown): QuestionMediaItem[] {
+  if (Array.isArray(val)) return val as QuestionMediaItem[];
+  if (typeof val === 'string' && val.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(val);
+      return Array.isArray(parsed) ? (parsed as QuestionMediaItem[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
+ * Mengunggah gambar soal dengan kompresi WebP otomatis di browser ke bucket `exam-images`.
+ * Jika bucket belum dibuat di Supabase, otomatis memakai fallback data-URL terkompresi
+ * agar guru tetap dapat menyusun soal tanpa hambatan.
+ */
+export async function uploadQuestionImageSupabase(
+  file: File,
+  examCode: string,
+  questionId: string
+): Promise<{ url: string; usedStorage: boolean; sizeKb: number }> {
+  const compressed = await compressImageFile(file, 1280, 0.82);
+  const safeExam = (examCode || 'EXAM').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeQid = (questionId || 'Q').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const path = `${safeExam}/${safeQid}_${Date.now()}.${compressed.ext}`;
+
+  try {
+    const { error } = await supabase.storage.from('exam-images').upload(path, compressed.blob, {
+      cacheControl: '31536000',
+      contentType: compressed.mimeType,
+      upsert: true
+    });
+
+    if (!error) {
+      const { data } = supabase.storage.from('exam-images').getPublicUrl(path);
+      if (data?.publicUrl) {
+        return { url: data.publicUrl, usedStorage: true, sizeKb: compressed.sizeKb };
+      }
+    }
+  } catch {
+    // Fallback below if storage bucket isn't provisioned yet
+  }
+
+  const dataUrl = await blobToDataUrl(compressed.blob);
+  return { url: dataUrl, usedStorage: false, sizeKb: compressed.sizeKb };
+}
+
+/**
+ * Mengambil seluruh data untuk Konsol Guru / Admin / Pengawas.
+ */
 export async function fetchExamDatabaseFromSupabase(): Promise<{
   data: ExamDatabase | null;
   hasTables: boolean;
@@ -95,7 +157,6 @@ export async function fetchExamDatabaseFromSupabase(): Promise<{
     instructions: String(cfgRow.instructions || '')
   };
 
-  // Group rubrics by question_id
   const rubricsByQuestion: Record<string, Record<string, RubricCriterion>> = {};
   (rbRes.data || []).forEach((r) => {
     const qid = String(r.question_id);
@@ -125,6 +186,9 @@ export async function fetchExamDatabaseFromSupabase(): Promise<{
       max_score: Number(q.max_score || 0),
       order_no: Number(q.order_no || 1),
       active: Boolean(q.active),
+      media_layout: parseMediaLayout(q.media_layout),
+      media_items: parseMediaItems(q.media_items),
+      answer_key_image_url: q.answer_key_image_url ? String(q.answer_key_image_url) : undefined,
       rubrics: rubricsByQuestion[qid] || {}
     };
   });
@@ -142,7 +206,6 @@ export async function fetchExamDatabaseFromSupabase(): Promise<{
     };
   });
 
-  // Group normalized response rows (student_id, question_id) into StudentSubmission map
   const responses: Record<string, StudentSubmission> = {};
   (respRes.data || []).forEach((r) => {
     const sid = String(r.student_id);
@@ -194,9 +257,183 @@ export async function fetchExamDatabaseFromSupabase(): Promise<{
   };
 }
 
+/**
+ * Verifikasi login siswa langsung terhadap 1 baris di Supabase (tanpa mengunduh tabel siswa lain).
+ */
+export async function verifyStudentLoginSupabase(
+  studentId: string,
+  accessCode: string,
+  examCode: string
+): Promise<{
+  student: StudentRecord;
+  config: ExamConfig;
+  alreadySubmitted: boolean;
+} | null> {
+  const [cfgRes, stRes, respRes] = await Promise.all([
+    supabase.from('exam_config').select('*').eq('exam_code', examCode.trim()).limit(1),
+    supabase
+      .from('students')
+      .select('*')
+      .eq('student_id', studentId.trim())
+      .eq('exam_code', examCode.trim())
+      .limit(1),
+    supabase
+      .from('responses')
+      .select('status')
+      .eq('student_id', studentId.trim())
+      .eq('exam_code', examCode.trim())
+      .eq('status', 'SUBMITTED')
+      .limit(1)
+  ]);
+
+  if (cfgRes.error || stRes.error) {
+    throw cfgRes.error || stRes.error;
+  }
+
+  const cfgRow = cfgRes.data?.[0];
+  const stRow = stRes.data?.[0];
+  if (!cfgRow || !stRow) return null;
+
+  if (
+    !Boolean(stRow.active) ||
+    String(stRow.access_code) !== accessCode.trim() ||
+    String(stRow.exam_code) !== examCode.trim()
+  ) {
+    return null;
+  }
+
+  return {
+    config: {
+      exam_code: String(cfgRow.exam_code),
+      school_name: String(cfgRow.school_name),
+      exam_title: String(cfgRow.exam_title),
+      duration_minutes: Number(cfgRow.duration_minutes || 120),
+      max_score: Number(cfgRow.max_score || 100),
+      exam_open: Boolean(cfgRow.exam_open),
+      instructions: String(cfgRow.instructions || '')
+    },
+    student: {
+      student_id: String(stRow.student_id),
+      full_name: String(stRow.full_name),
+      class_name: String(stRow.class_name || ''),
+      exam_code: String(stRow.exam_code),
+      access_code: String(stRow.access_code),
+      active: Boolean(stRow.active)
+    },
+    alreadySubmitted: Boolean(respRes.data && respRes.data.length > 0)
+  };
+}
+
+/**
+ * Jalur RINGAN KHUSUS SISWA:
+ * Hanya mengambil config ujian, soal aktif (TANPA kunci jawaban), dan jawaban milik siswa ini sendiri.
+ * Tidak mengambil daftar siswa lain, akun admin, nilai, maupun jawaban peserta lain.
+ */
+export async function fetchStudentExamScopeFromSupabase(
+  studentId: string,
+  examCode: string
+): Promise<{
+  config: ExamConfig | null;
+  questions: Record<string, QuestionItem>;
+  myResponse: StudentSubmission | null;
+}> {
+  const [cfgRes, respRes] = await Promise.all([
+    supabase.from('exam_config').select('*').eq('exam_code', examCode).limit(1),
+    supabase
+      .from('responses')
+      .select('*')
+      .eq('student_id', studentId)
+      .eq('exam_code', examCode)
+  ]);
+
+  if (cfgRes.error) throw new Error(formatSupabaseError(cfgRes.error));
+
+  // Ambil soal aktif via RPC aman (tanpa kolom answer_key); fallback ke SELECT spesifik jika RPC belum dibuat
+  let qRows: Array<Record<string, unknown>> = [];
+  const rpcRes = await supabase.rpc('get_student_exam_questions', { p_exam_code: examCode });
+  if (!rpcRes.error && Array.isArray(rpcRes.data)) {
+    qRows = rpcRes.data as Array<Record<string, unknown>>;
+  } else {
+    const qSel = await supabase
+      .from('questions')
+      .select(
+        'question_id, exam_code, subject, class_name, competency, indicator, topic, question_text, max_score, order_no, active, media_layout, media_items'
+      )
+      .eq('exam_code', examCode)
+      .eq('active', true)
+      .order('order_no', { ascending: true });
+    if (qSel.error) throw new Error(formatSupabaseError(qSel.error));
+    qRows = (qSel.data || []) as Array<Record<string, unknown>>;
+  }
+
+  const cfgRow = cfgRes.data?.[0];
+  const config: ExamConfig | null = cfgRow
+    ? {
+        exam_code: String(cfgRow.exam_code),
+        school_name: String(cfgRow.school_name),
+        exam_title: String(cfgRow.exam_title),
+        duration_minutes: Number(cfgRow.duration_minutes || 120),
+        max_score: Number(cfgRow.max_score || 100),
+        exam_open: Boolean(cfgRow.exam_open),
+        instructions: String(cfgRow.instructions || '')
+      }
+    : null;
+
+  const questions: Record<string, QuestionItem> = {};
+  qRows.forEach((q) => {
+    const qid = String(q.question_id);
+    questions[qid] = {
+      question_id: qid,
+      exam_code: String(q.exam_code),
+      subject: String(q.subject || ''),
+      class_name: String(q.class_name || ''),
+      competency: String(q.competency || ''),
+      indicator: String(q.indicator || ''),
+      topic: String(q.topic || ''),
+      question_text: String(q.question_text || ''),
+      answer_key: '',
+      max_score: Number(q.max_score || 0),
+      order_no: Number(q.order_no || 1),
+      active: Boolean(q.active),
+      media_layout: parseMediaLayout(q.media_layout),
+      media_items: parseMediaItems(q.media_items),
+      rubrics: {}
+    };
+  });
+
+  let myResponse: StudentSubmission | null = null;
+  if (!respRes.error && respRes.data && respRes.data.length > 0) {
+    respRes.data.forEach((r) => {
+      if (!myResponse) {
+        myResponse = {
+          student_id: String(r.student_id),
+          full_name: String(r.full_name),
+          class_name: String(r.class_name || ''),
+          exam_code: String(r.exam_code),
+          status: r.status === 'SUBMITTED' ? 'SUBMITTED' : 'IN_PROGRESS',
+          started_at: r.started_at ? String(r.started_at) : undefined,
+          submitted_at: r.submitted_at ? String(r.submitted_at) : undefined,
+          draft_updated_at: r.updated_at ? String(r.updated_at) : undefined,
+          answers: {}
+        };
+      }
+      if (r.status === 'SUBMITTED') {
+        myResponse.status = 'SUBMITTED';
+        if (r.submitted_at) myResponse.submitted_at = String(r.submitted_at);
+      }
+      myResponse.answers[String(r.question_id)] = String(r.answer_text || '');
+    });
+  }
+
+  return { config, questions, myResponse };
+}
+
+/**
+ * Realtime untuk Konsol Guru/Admin (mendengarkan perubahan ujian & jawaban).
+ */
 export function subscribeExamSupabase(onChange: () => void): RealtimeChannel {
   return supabase
-    .channel('ujian-sekolah-realtime')
+    .channel('ujian-sekolah-admin-realtime')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'exam_config' }, onChange)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_users' }, onChange)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'questions' }, onChange)
@@ -204,6 +441,42 @@ export function subscribeExamSupabase(onChange: () => void): RealtimeChannel {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, onChange)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'responses' }, onChange)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'grades' }, onChange)
+    .subscribe();
+}
+
+/**
+ * Realtime RINGAN KHUSUS SISWA:
+ * Hanya mendengarkan perubahan status buka/tutup/instruksi di exam_config.
+ * Tidak ikut bereaksi saat 300 siswa lain mengetik jawaban.
+ */
+export function subscribeStudentConfigSupabase(
+  examCode: string,
+  onConfigUpdate: (config: ExamConfig) => void
+): RealtimeChannel {
+  return supabase
+    .channel(`student-config-${examCode}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'exam_config',
+        filter: `exam_code=eq.${examCode}`
+      },
+      (payload) => {
+        const row = payload.new as Record<string, unknown> | undefined;
+        if (!row || !row.exam_code) return;
+        onConfigUpdate({
+          exam_code: String(row.exam_code),
+          school_name: String(row.school_name || ''),
+          exam_title: String(row.exam_title || ''),
+          duration_minutes: Number(row.duration_minutes || 120),
+          max_score: Number(row.max_score || 100),
+          exam_open: Boolean(row.exam_open),
+          instructions: String(row.instructions || '')
+        });
+      }
+    )
     .subscribe();
 }
 
@@ -280,13 +553,15 @@ export async function upsertQuestionWithRubricsSupabase(q: QuestionItem): Promis
       answer_key: q.answer_key,
       max_score: q.max_score,
       order_no: q.order_no,
-      active: q.active
+      active: q.active,
+      media_layout: q.media_layout || 'top',
+      media_items: q.media_items || [],
+      answer_key_image_url: q.answer_key_image_url || ''
     },
     { onConflict: 'question_id' }
   );
   if (qErr) throw new Error(formatSupabaseError(qErr));
 
-  // Sync rubrics cleanly for this question
   const { error: delErr } = await supabase
     .from('rubrics')
     .delete()
@@ -417,7 +692,6 @@ export async function bulkUpsertGradesSupabase(grades: QuestionGrade[]): Promise
 }
 
 export async function pushFullDatabaseToSupabase(db: ExamDatabase): Promise<void> {
-  // 1. Config & Admin Users
   await upsertExamConfigSupabase(db.config);
   const admins = Object.values(db.admin_users || {});
   if (admins.length) {
@@ -435,7 +709,6 @@ export async function pushFullDatabaseToSupabase(db: ExamDatabase): Promise<void
     if (admErr) throw new Error(formatSupabaseError(admErr));
   }
 
-  // 2. Questions & Rubrics
   const questions = Object.values(db.questions || {});
   if (questions.length) {
     const { error: qErr } = await supabase.from('questions').upsert(
@@ -451,7 +724,10 @@ export async function pushFullDatabaseToSupabase(db: ExamDatabase): Promise<void
         answer_key: q.answer_key,
         max_score: q.max_score,
         order_no: q.order_no,
-        active: q.active
+        active: q.active,
+        media_layout: q.media_layout || 'top',
+        media_items: q.media_items || [],
+        answer_key_image_url: q.answer_key_image_url || ''
       })),
       { onConflict: 'question_id' }
     );
@@ -475,13 +751,11 @@ export async function pushFullDatabaseToSupabase(db: ExamDatabase): Promise<void
     }
   }
 
-  // 3. Students
   const students = Object.values(db.students || {});
   if (students.length) {
     await upsertStudentsSupabase(students);
   }
 
-  // 4. Responses
   const responseRows = Object.values(db.responses || {}).flatMap((resp) =>
     Object.entries(resp.answers || {}).map(([questionId, answerText]) => ({
       student_id: resp.student_id,
@@ -503,7 +777,6 @@ export async function pushFullDatabaseToSupabase(db: ExamDatabase): Promise<void
     if (rErr) throw new Error(formatSupabaseError(rErr));
   }
 
-  // 5. Grades
   const gradeRows = Object.values(db.grades || {}).flatMap((byQ) =>
     Object.values(byQ).map((g) => ({
       grade_id: g.grade_id,

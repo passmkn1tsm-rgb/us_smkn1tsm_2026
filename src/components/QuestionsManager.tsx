@@ -7,15 +7,27 @@ import {
   AlertCircle,
   Download,
   Upload,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Image as ImageIcon,
+  MapPin,
+  X
 } from 'lucide-react';
-import { ExamDatabase, QuestionItem, RubricCriterion } from '../types/exam';
+import {
+  ExamDatabase,
+  ImagePin,
+  QuestionItem,
+  QuestionMediaItem,
+  QuestionMediaLayout,
+  RubricCriterion
+} from '../types/exam';
 import {
   CsvDelimiter,
   downloadQuestionsTemplate,
   downloadRubricsTemplate,
   parseQuestionsAndRubricsFromText
 } from '../utils/csvTemplates';
+import { uploadQuestionImageSupabase } from '../services/supabaseService';
+import { QuestionMediaViewer } from './QuestionMediaViewer';
 
 interface QuestionsManagerProps {
   db: ExamDatabase;
@@ -80,10 +92,17 @@ export const QuestionsManager: React.FC<QuestionsManagerProps> = ({
   const [bulkRubricsText, setBulkRubricsText] = useState('');
   const [importNotice, setImportNotice] = useState<string | null>(null);
 
+  // Media & Pin annotation states
+  const [uploadingMedia, setUploadingMedia] = useState(false);
+  const [mediaNotice, setMediaNotice] = useState<string | null>(null);
+  const [pinningMediaId, setPinningMediaId] = useState<string | null>(null);
+
   const selectQuestion = (q: QuestionItem) => {
     setSelectedId(q.question_id);
     setDraft(JSON.parse(JSON.stringify(q)));
     setFeedback(null);
+    setMediaNotice(null);
+    setPinningMediaId(null);
     setConfirmDeleteId(null);
   };
 
@@ -143,6 +162,116 @@ export const QuestionsManager: React.FC<QuestionsManagerProps> = ({
     ? Object.values(draft.rubrics || {}).reduce((acc, r) => acc + Number(r.max_points || 0), 0)
     : 0;
 
+  const handleAddMediaSlot = () => {
+    if (!draft) return;
+    const current = draft.media_items || [];
+    if (current.length >= 4) {
+      setMediaNotice('Maksimal 4 gambar per soal agar halaman tetap ringan bagi siswa.');
+      return;
+    }
+    const nextIdx = current.length + 1;
+    const defaultLabel =
+      draft.media_layout === 'compare_ab'
+        ? nextIdx === 1
+          ? 'Gambar A'
+          : nextIdx === 2
+          ? 'Gambar B'
+          : `Gambar ${nextIdx}`
+        : `Gambar ${nextIdx}`;
+    const nextItem: QuestionMediaItem = {
+      id: `${draft.question_id}_IMG_${Date.now().toString().slice(-4)}_${nextIdx}`,
+      url: '',
+      label: defaultLabel,
+      caption: '',
+      pins: []
+    };
+    setDraft({ ...draft, media_items: [...current, nextItem] });
+    setMediaNotice(null);
+  };
+
+  const handleUpdateMediaItem = (id: string, patch: Partial<QuestionMediaItem>) => {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      media_items: (draft.media_items || []).map((item) =>
+        item.id === id ? { ...item, ...patch } : item
+      )
+    });
+  };
+
+  const handleRemoveMediaItem = (id: string) => {
+    if (!draft) return;
+    if (pinningMediaId === id) setPinningMediaId(null);
+    setDraft({
+      ...draft,
+      media_items: (draft.media_items || []).filter((item) => item.id !== id)
+    });
+  };
+
+  const handleUploadImageForSlot = async (mediaId: string, file: File) => {
+    if (!draft) return;
+    setUploadingMedia(true);
+    setMediaNotice(null);
+    try {
+      const res = await uploadQuestionImageSupabase(
+        file,
+        draft.exam_code || db.config.exam_code,
+        draft.question_id
+      );
+      handleUpdateMediaItem(mediaId, { url: res.url });
+      setMediaNotice(
+        res.usedStorage
+          ? `Gambar terkompresi (${res.sizeKb} KB) berhasil diunggah ke Supabase Storage.`
+          : `Gambar terkompresi (${res.sizeKb} KB) dimuat sebagai cadangan ringan (aktifkan bucket exam-images di SQL Editor untuk CDN Storage).`
+      );
+    } catch (err) {
+      setMediaNotice(err instanceof Error ? err.message : 'Gagal memproses file gambar.');
+    } finally {
+      setUploadingMedia(false);
+    }
+  };
+
+  const handleUploadAnswerKeyImage = async (file: File) => {
+    if (!draft) return;
+    setUploadingMedia(true);
+    setMediaNotice(null);
+    try {
+      const res = await uploadQuestionImageSupabase(
+        file,
+        draft.exam_code || db.config.exam_code,
+        `${draft.question_id}_KEY`
+      );
+      setDraft({ ...draft, answer_key_image_url: res.url });
+      setMediaNotice(`Gambar referensi kunci jawaban (${res.sizeKb} KB) siap disimpan.`);
+    } catch (err) {
+      setMediaNotice(err instanceof Error ? err.message : 'Gagal memproses gambar kunci.');
+    } finally {
+      setUploadingMedia(false);
+    }
+  };
+
+  const handlePlacePinOnImage = (
+    mediaId: string,
+    e: React.MouseEvent<HTMLDivElement>
+  ) => {
+    if (!draft || pinningMediaId !== mediaId) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * 1000) / 10;
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * 1000) / 10;
+
+    const target = (draft.media_items || []).find((m) => m.id === mediaId);
+    const existingPins = target?.pins || [];
+    const nextPin: ImagePin = {
+      id: `PIN_${Date.now().toString().slice(-4)}`,
+      label: String(existingPins.length + 1),
+      x: Math.min(98, Math.max(2, x)),
+      y: Math.min(98, Math.max(2, y)),
+      note: ''
+    };
+    handleUpdateMediaItem(mediaId, { pins: [...existingPins, nextPin] });
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!draft) return;
@@ -153,9 +282,11 @@ export const QuestionsManager: React.FC<QuestionsManagerProps> = ({
     setSaving(true);
     setFeedback(null);
     try {
+      const cleanedMedia = (draft.media_items || []).filter((m) => m.url.trim().length > 0);
       await onSaveQuestion({
         ...draft,
         question_id: draft.question_id.trim(),
+        media_items: cleanedMedia,
         max_score: Number(draft.max_score) || rubricSum || 10
       });
       setFeedback(`Soal ${draft.question_id} beserta rubriknya berhasil disimpan.`);
@@ -410,8 +541,16 @@ export const QuestionsManager: React.FC<QuestionsManagerProps> = ({
                 <p className="mt-1 text-sm font-medium text-slate-800 line-clamp-2">
                   {q.question_text || '(Belum ada teks soal)'}
                 </p>
-                <div className="mt-1.5 text-xs text-slate-500">
-                  {q.topic || 'Umum'} · {rCount} aspek rubrik
+                <div className="mt-1.5 flex items-center justify-between text-xs text-slate-500">
+                  <span>
+                    {q.topic || 'Umum'} · {rCount} aspek rubrik
+                  </span>
+                  {(q.media_items || []).filter((m) => m.url).length > 0 && (
+                    <span className="inline-flex items-center gap-1 font-medium text-emerald-800">
+                      <ImageIcon className="h-3 w-3" />
+                      {(q.media_items || []).filter((m) => m.url).length} gambar
+                    </span>
+                  )}
                 </div>
               </button>
             );
@@ -567,16 +706,318 @@ export const QuestionsManager: React.FC<QuestionsManagerProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Kunci / Acuan Jawaban Ideal (hanya tampil bagi guru saat koreksi)
-                </label>
-                <textarea
-                  rows={2}
-                  value={draft.answer_key}
-                  onChange={(e) => setDraft({ ...draft, answer_key: e.target.value })}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm leading-relaxed"
-                />
+              {/* Visual Stimulus & Media Builder */}
+              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-4 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-900">
+                      <ImageIcon className="h-4 w-4 text-emerald-800" />
+                      Media Gambar &amp; Variasi Stimulus Visual (Opsional)
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Gambar otomatis dikompresi ke WebP ringan. Mendukung stimulus tunggal,
+                      perbandingan A vs B, galeri seri (maks 4), dan pin penanda bernomor.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleAddMediaSlot}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Tambah Gambar
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Variasi Tata Letak di Layar Siswa
+                    </label>
+                    <select
+                      value={draft.media_layout || 'top'}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          media_layout: e.target.value as QuestionMediaLayout
+                        })
+                      }
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-800"
+                    >
+                      <option value="top">Atas Soal (Gambar lebar / diagram / tabel)</option>
+                      <option value="side">
+                        Samping Kiri-Kanan (Poster / teks panjang tanpa sering scroll)
+                      </option>
+                      <option value="compare_ab">
+                        Perbandingan Berdampingan (Gambar A vs Gambar B)
+                      </option>
+                      <option value="gallery">Galeri Proses / Studi Kasus Seri (2–4 Gambar)</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-end text-xs text-slate-600">
+                    {mediaNotice && (
+                      <div className="w-full rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-900">
+                        {mediaNotice}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {(draft.media_items || []).length > 0 && (
+                  <div className="space-y-4">
+                    {(draft.media_items || []).map((item, mIdx) => {
+                      const isPinning = pinningMediaId === item.id;
+                      const pins = item.pins || [];
+                      return (
+                        <div
+                          key={item.id}
+                          className="rounded-lg border border-slate-200 bg-white p-4 space-y-3"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                            <span className="font-mono text-xs font-semibold text-slate-800">
+                              Media #{mIdx + 1}
+                            </span>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <label className="inline-flex items-center gap-1.5 rounded-md border border-emerald-800 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-900 hover:bg-emerald-100 cursor-pointer">
+                                <Upload className="h-3.5 w-3.5" />
+                                {uploadingMedia ? 'Mengompresi...' : 'Unggah File'}
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  disabled={uploadingMedia}
+                                  onChange={async (e) => {
+                                    const f = e.target.files?.[0];
+                                    if (f) await handleUploadImageForSlot(item.id, f);
+                                    e.target.value = '';
+                                  }}
+                                  className="sr-only"
+                                />
+                              </label>
+
+                              {item.url && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPinningMediaId(isPinning ? null : item.id)
+                                  }
+                                  className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium cursor-pointer ${
+                                    isPinning
+                                      ? 'border-amber-600 bg-amber-50 text-amber-900'
+                                      : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <MapPin className="h-3.5 w-3.5" />
+                                  {isPinning ? 'Selesai Pasang Pin' : 'Pasang Pin Bernomor'}
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveMediaItem(item.id)}
+                                className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 cursor-pointer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                Hapus
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                            <div className="sm:col-span-3">
+                              <label className="block text-xs text-slate-500 mb-1">
+                                Label (opsional)
+                              </label>
+                              <input
+                                type="text"
+                                value={item.label || ''}
+                                onChange={(e) =>
+                                  handleUpdateMediaItem(item.id, { label: e.target.value })
+                                }
+                                placeholder="Contoh: Poster A"
+                                className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs"
+                              />
+                            </div>
+                            <div className="sm:col-span-5">
+                              <label className="block text-xs text-slate-500 mb-1">
+                                URL Gambar (otomatis terisi saat unggah)
+                              </label>
+                              <input
+                                type="text"
+                                value={item.url}
+                                onChange={(e) =>
+                                  handleUpdateMediaItem(item.id, { url: e.target.value })
+                                }
+                                placeholder="https://... atau unggah file di kanan atas"
+                                className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs"
+                              />
+                            </div>
+                            <div className="sm:col-span-4">
+                              <label className="block text-xs text-slate-500 mb-1">
+                                Keterangan / Caption
+                              </label>
+                              <input
+                                type="text"
+                                value={item.caption || ''}
+                                onChange={(e) =>
+                                  handleUpdateMediaItem(item.id, { caption: e.target.value })
+                                }
+                                placeholder="Sumber atau konteks gambar"
+                                className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-xs"
+                              />
+                            </div>
+                          </div>
+
+                          {item.url && (
+                            <div className="grid grid-cols-1 gap-4 md:grid-cols-12 items-start pt-1">
+                              <div className="md:col-span-6">
+                                <div
+                                  onClick={(e) => handlePlacePinOnImage(item.id, e)}
+                                  className={`relative rounded-lg border bg-slate-100 overflow-hidden ${
+                                    isPinning
+                                      ? 'border-amber-500 ring-2 ring-amber-400/50 cursor-crosshair'
+                                      : 'border-slate-200'
+                                  }`}
+                                >
+                                  <img
+                                    src={item.url}
+                                    alt={item.caption || item.label || 'Pratinjau gambar soal'}
+                                    className="w-full max-h-52 object-contain bg-white"
+                                  />
+                                  {pins.map((pin) => (
+                                    <span
+                                      key={pin.id}
+                                      style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
+                                      className="absolute -translate-x-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-emerald-900 font-mono text-xs font-bold text-white shadow"
+                                    >
+                                      {pin.label}
+                                    </span>
+                                  ))}
+                                </div>
+                                {isPinning && (
+                                  <p className="mt-1 text-[11px] font-medium text-amber-800">
+                                    Klik titik mana saja di atas gambar untuk menambahkan Pin #
+                                    {pins.length + 1}.
+                                  </p>
+                                )}
+                              </div>
+
+                              <div className="md:col-span-6 space-y-2">
+                                <div className="text-xs font-semibold text-slate-700">
+                                  Daftar Pin Penanda ({pins.length})
+                                </div>
+                                {pins.length === 0 ? (
+                                  <p className="text-xs text-slate-500">
+                                    Belum ada pin. Klik &ldquo;Pasang Pin Bernomor&rdquo; lalu klik
+                                    bagian gambar untuk menandai objek yang ditanyakan.
+                                  </p>
+                                ) : (
+                                  <div className="space-y-1.5">
+                                    {pins.map((pin) => (
+                                      <div
+                                        key={pin.id}
+                                        className="flex items-center gap-2 rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5"
+                                      >
+                                        <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-900 font-mono text-[11px] font-bold text-white">
+                                          {pin.label}
+                                        </span>
+                                        <input
+                                          type="text"
+                                          value={pin.note || ''}
+                                          onChange={(e) =>
+                                            handleUpdateMediaItem(item.id, {
+                                              pins: pins.map((p) =>
+                                                p.id === pin.id ? { ...p, note: e.target.value } : p
+                                              )
+                                            })
+                                          }
+                                          placeholder="Catatan singkat pin (opsional)"
+                                          className="flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleUpdateMediaItem(item.id, {
+                                              pins: pins.filter((p) => p.id !== pin.id)
+                                            })
+                                          }
+                                          aria-label={`Hapus pin ${pin.label}`}
+                                          className="text-slate-400 hover:text-red-700 cursor-pointer"
+                                        >
+                                          <X className="h-3.5 w-3.5" />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    <div className="rounded-lg border border-slate-200 bg-white p-3.5 space-y-2">
+                      <div className="text-xs font-semibold text-slate-700">
+                        Pratinjau Tampilan di Lembar Siswa:
+                      </div>
+                      <QuestionMediaViewer
+                        items={draft.media_items}
+                        layout={draft.media_layout}
+                        compact
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Kunci / Acuan Jawaban Ideal (hanya tampil bagi guru saat koreksi)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={draft.answer_key}
+                    onChange={(e) => setDraft({ ...draft, answer_key: e.target.value })}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm leading-relaxed"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 items-end">
+                  <div className="sm:col-span-9">
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Gambar Referensi Kunci Jawaban (opsional, khusus guru saat koreksi)
+                    </label>
+                    <input
+                      type="text"
+                      value={draft.answer_key_image_url || ''}
+                      onChange={(e) =>
+                        setDraft({ ...draft, answer_key_image_url: e.target.value })
+                      }
+                      placeholder="URL gambar acuan kunci atau unggah di samping"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs"
+                    />
+                  </div>
+                  <div className="sm:col-span-3">
+                    <label className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 cursor-pointer">
+                      <Upload className="h-3.5 w-3.5" />
+                      Unggah Kunci
+                      <input
+                        type="file"
+                        accept="image/*"
+                        disabled={uploadingMedia}
+                        onChange={async (e) => {
+                          const f = e.target.files?.[0];
+                          if (f) await handleUploadAnswerKeyImage(f);
+                          e.target.value = '';
+                        }}
+                        className="sr-only"
+                      />
+                    </label>
+                  </div>
+                </div>
               </div>
 
               {/* Rubrics Builder */}

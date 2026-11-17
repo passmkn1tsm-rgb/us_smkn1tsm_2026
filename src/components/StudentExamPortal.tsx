@@ -1,14 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Clock, CheckCircle2, AlertTriangle, Send } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Clock, CheckCircle2, AlertTriangle, Send, WifiOff } from 'lucide-react';
 import { ExamDatabase, StudentRecord } from '../types/exam';
+import { QuestionMediaViewer } from './QuestionMediaViewer';
 
 interface StudentExamPortalProps {
   db: ExamDatabase;
   initialStudent?: StudentRecord | null;
-  onSaveDraft: (student: StudentRecord, answers: Record<string, string>) => Promise<void>;
+  onSaveDraft: (student: StudentRecord, changedAnswers: Record<string, string>) => Promise<void>;
   onSubmitExam: (student: StudentRecord, answers: Record<string, string>) => Promise<void>;
   onLogout?: () => void;
 }
+
+const getStudentDraftBackupKey = (studentId: string, examCode: string) =>
+  `ujian_student_draft_v1_${studentId}_${examCode}`;
 
 export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
   db,
@@ -26,14 +30,26 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     if (!initialStudent) return {};
     const existingResp = db.responses?.[initialStudent.student_id];
+    let localBackup: Record<string, string> = {};
+    try {
+      const raw = localStorage.getItem(
+        getStudentDraftBackupKey(initialStudent.student_id, initialStudent.exam_code)
+      );
+      if (raw) localBackup = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      // Ignore storage error
+    }
+
     const initialAnswers: Record<string, string> = {};
     Object.values(db.questions || {})
       .filter((q) => q.active && q.exam_code === db.config.exam_code)
       .forEach((q) => {
-        initialAnswers[q.question_id] = existingResp?.answers?.[q.question_id] || '';
+        initialAnswers[q.question_id] =
+          localBackup[q.question_id] ?? existingResp?.answers?.[q.question_id] ?? '';
       });
     return initialAnswers;
   });
+
   const [remainingSeconds, setRemainingSeconds] = useState(() =>
     initialStudent ? Number(db.config.duration_minutes || 120) * 60 : 0
   );
@@ -42,30 +58,93 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
       ? 'Draf sebelumnya dipulihkan'
       : null
   );
+  const [syncPendingOffline, setSyncPendingOffline] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submittedAt, setSubmittedAt] = useState<string | null>(null);
 
   const debounceRef = useRef<number | null>(null);
+  const dirtyQuestionIdsRef = useRef<Set<string>>(new Set());
+  const latestAnswersRef = useRef<Record<string, string>>(answers);
+  latestAnswersRef.current = answers;
 
   const activeQuestions = Object.values(db.questions || {})
     .filter((q) => q.active && q.exam_code === db.config.exam_code)
     .sort((a, b) => a.order_no - b.order_no);
 
+  // Restore remote answers when scope loads after initialStudent login
   useEffect(() => {
     if (!initialStudent) return;
-    const existingResp = db.responses?.[initialStudent.student_id];
-    const restoredAnswers: Record<string, string> = {};
-    activeQuestions.forEach((q) => {
-      restoredAnswers[q.question_id] = existingResp?.answers?.[q.question_id] || '';
-    });
     setActiveStudent(initialStudent);
-    setAnswers(restoredAnswers);
-    setRemainingSeconds(Number(db.config.duration_minutes || 120) * 60);
-    if (existingResp?.draft_updated_at) {
+
+    const existingResp = db.responses?.[initialStudent.student_id];
+    let localBackup: Record<string, string> = {};
+    try {
+      const raw = localStorage.getItem(
+        getStudentDraftBackupKey(initialStudent.student_id, initialStudent.exam_code)
+      );
+      if (raw) localBackup = JSON.parse(raw) as Record<string, string>;
+    } catch {
+      // Ignore
+    }
+
+    setAnswers((prev) => {
+      const merged: Record<string, string> = { ...prev };
+      activeQuestions.forEach((q) => {
+        if (dirtyQuestionIdsRef.current.has(q.question_id)) return;
+        const localVal = localBackup[q.question_id];
+        const remoteVal = existingResp?.answers?.[q.question_id];
+        merged[q.question_id] =
+          localVal !== undefined && localVal !== ''
+            ? localVal
+            : prev[q.question_id] || remoteVal || '';
+      });
+      return merged;
+    });
+
+    if (existingResp?.draft_updated_at && !draftSavedAt) {
       setDraftSavedAt('Draf sebelumnya dipulihkan');
     }
-  }, [initialStudent?.student_id]);
+  }, [initialStudent?.student_id, activeQuestions.length]);
+
+  const flushDirtyDrafts = useCallback(
+    async (student: StudentRecord) => {
+      const dirtyIds = Array.from(dirtyQuestionIdsRef.current);
+      if (!dirtyIds.length) return;
+
+      const changedOnly: Record<string, string> = {};
+      dirtyIds.forEach((qid) => {
+        changedOnly[qid] = latestAnswersRef.current[qid] || '';
+      });
+
+      try {
+        await onSaveDraft(student, changedOnly);
+        dirtyIds.forEach((qid) => dirtyQuestionIdsRef.current.delete(qid));
+        setSyncPendingOffline(false);
+        const now = new Date();
+        setDraftSavedAt(
+          `Tersimpan ${now.getHours().toString().padStart(2, '0')}:${now
+            .getMinutes()
+            .toString()
+            .padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
+        );
+      } catch {
+        // Jaringan terputus sesaat — pertahankan antrean dirtyQuestionIdsRef & cadangan localStorage
+        setSyncPendingOffline(true);
+      }
+    },
+    [onSaveDraft]
+  );
+
+  // Otomatis sinkronkan ulang begitu Wi-Fi/sinyal siswa terhubung kembali
+  useEffect(() => {
+    if (!activeStudent || submittedAt) return;
+    const handleOnline = () => {
+      flushDirtyDrafts(activeStudent);
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [activeStudent, submittedAt, flushDirtyDrafts]);
 
   useEffect(() => {
     if (!activeStudent || submittedAt) return;
@@ -121,12 +200,12 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
       return;
     }
 
-    // Pulihkan draf sebelumnya jika siswa pernah terputus / refresh!
     const restoredAnswers: Record<string, string> = {};
     activeQuestions.forEach((q) => {
       restoredAnswers[q.question_id] = existingResp?.answers?.[q.question_id] || '';
     });
 
+    dirtyQuestionIdsRef.current.clear();
     setAnswers(restoredAnswers);
     setActiveStudent(found);
     setRemainingSeconds(Number(db.config.duration_minutes || 120) * 60);
@@ -138,28 +217,49 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
   const handleAnswerChange = (questionId: string, value: string) => {
     const updated = { ...answers, [questionId]: value };
     setAnswers(updated);
+    latestAnswersRef.current = updated;
     if (!activeStudent) return;
+
+    // 1. Cadangan instan di browser siswa (anti-hilang meski sinyal putus)
+    try {
+      localStorage.setItem(
+        getStudentDraftBackupKey(activeStudent.student_id, activeStudent.exam_code),
+        JSON.stringify(updated)
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+
+    // 2. Tandai hanya butir soal yang berubah, debounce 2.5 detik untuk hemat beban server
+    dirtyQuestionIdsRef.current.add(questionId);
+    setDraftSavedAt('Mengetik...');
 
     if (debounceRef.current) {
       window.clearTimeout(debounceRef.current);
     }
-    debounceRef.current = window.setTimeout(async () => {
-      await onSaveDraft(activeStudent, updated);
-      const now = new Date();
-      setDraftSavedAt(
-        `Draf tersimpan ${now.getHours().toString().padStart(2, '0')}:${now
-          .getMinutes()
-          .toString()
-          .padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
-      );
-    }, 500);
+    const currentStudent = activeStudent;
+    debounceRef.current = window.setTimeout(() => {
+      flushDirtyDrafts(currentStudent);
+    }, 2500);
   };
 
   const handleFinalSubmit = async () => {
     if (!activeStudent || submitting) return;
+    if (debounceRef.current) {
+      window.clearTimeout(debounceRef.current);
+    }
     setSubmitting(true);
     try {
-      await onSubmitExam(activeStudent, answers);
+      await onSubmitExam(activeStudent, latestAnswersRef.current);
+      dirtyQuestionIdsRef.current.clear();
+      setSyncPendingOffline(false);
+      try {
+        localStorage.removeItem(
+          getStudentDraftBackupKey(activeStudent.student_id, activeStudent.exam_code)
+        );
+      } catch {
+        // Ignore
+      }
       setSubmittedAt(new Date().toLocaleTimeString('id-ID'));
       setShowConfirmModal(false);
     } finally {
@@ -218,10 +318,12 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
           <div className="text-xs font-medium text-slate-500">
             {db.config.school_name} · {db.config.exam_title}
           </div>
-          <h1 className="mt-1 text-2xl font-semibold text-slate-900">Masuk Ujian Peserta</h1>
+          <h1 className="mt-1 text-2xl font-semibold text-slate-900">
+            Pratinjau Ujian Peserta
+          </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Masukkan NIS/NISN, kode akses pribadi, dan kode ujian. Berbeda dari skrip lama, kode
-            ujian tidak lagi diisi otomatis demi keamanan akses.
+            Masukkan NIS/NISN, kode akses pribadi, dan kode ujian untuk menguji tampilan lembar
+            soal bergambar sebagai peserta.
           </p>
         </div>
 
@@ -298,18 +400,23 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="mx-auto max-w-5xl space-y-6">
       {/* Sticky Exam Status Strip */}
       <div className="sticky top-16 z-10 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-5 py-3.5 shadow-xs">
         <div>
           <div className="text-sm font-semibold text-slate-900">{activeStudent.full_name}</div>
-          <div className="text-xs text-slate-500">
-            {activeStudent.class_name} · ID <span className="font-mono">{activeStudent.student_id}</span>
-            {draftSavedAt && (
-              <>
-                {' '}
-                · <span className="text-emerald-700 font-medium">{draftSavedAt}</span>
-              </>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <span>
+              {activeStudent.class_name} · ID{' '}
+              <span className="font-mono">{activeStudent.student_id}</span>
+            </span>
+            {syncPendingOffline ? (
+              <span className="inline-flex items-center gap-1 font-medium text-amber-700">
+                <WifiOff className="h-3.5 w-3.5" />
+                Tersimpan di perangkat (menunggu sinyal)
+              </span>
+            ) : (
+              draftSavedAt && <span className="text-emerald-700 font-medium">· {draftSavedAt}</span>
             )}
           </div>
         </div>
@@ -321,8 +428,9 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
           </div>
           <button
             type="button"
+            disabled={activeQuestions.length === 0}
             onClick={() => setShowConfirmModal(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 cursor-pointer whitespace-nowrap"
+            className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 cursor-pointer whitespace-nowrap"
           >
             <Send className="h-4 w-4" />
             Kirim Jawaban
@@ -341,48 +449,90 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
         {db.config.instructions}
       </div>
 
-      {/* Essay Questions */}
-      <div className="space-y-5">
-        {activeQuestions.map((q, index) => {
-          const text = answers[q.question_id] || '';
-          const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
-          return (
-            <div
-              key={q.question_id}
-              className="rounded-lg border border-slate-200 bg-white p-6 space-y-3"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-                <span>
-                  Soal #{index + 1} · {q.topic || q.subject}
-                </span>
-                <span className="font-mono font-medium text-slate-700 tabular-nums">
-                  Skor maks: {q.max_score} poin
-                </span>
+      {activeQuestions.length === 0 ? (
+        <div className="rounded-lg border border-slate-200 bg-white p-8 text-center text-sm text-slate-600">
+          Memuat butir soal aktif untuk ujian <span className="font-mono">{db.config.exam_code}</span>
+          ...
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {activeQuestions.map((q, index) => {
+            const text = answers[q.question_id] || '';
+            const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
+            const mediaItems = (q.media_items || []).filter((m) => m.url && m.url.trim().length > 0);
+            const hasMedia = mediaItems.length > 0;
+            const useSideLayout = hasMedia && q.media_layout === 'side';
+
+            return (
+              <div
+                key={q.question_id}
+                className="rounded-lg border border-slate-200 bg-white p-6 space-y-4"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                  <span>
+                    Soal #{index + 1} · {q.topic || q.subject}
+                  </span>
+                  <span className="font-mono font-medium text-slate-700 tabular-nums">
+                    Skor maks: {q.max_score} poin
+                  </span>
+                </div>
+
+                {useSideLayout ? (
+                  <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
+                    <div className="lg:col-span-5">
+                      <QuestionMediaViewer items={mediaItems} layout={q.media_layout} />
+                    </div>
+                    <div className="lg:col-span-7 space-y-3">
+                      <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
+                        {q.question_text}
+                      </h3>
+                      {q.indicator && (
+                        <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
+                      )}
+                      <textarea
+                        rows={7}
+                        value={text}
+                        onChange={(e) => handleAnswerChange(q.question_id, e.target.value)}
+                        placeholder="Tuliskan jawaban uraian Anda secara lengkap..."
+                        className="w-full rounded-lg border border-slate-300 px-3.5 py-3 text-sm leading-relaxed text-slate-900 focus:border-emerald-800 focus:outline-none"
+                      />
+                      <div className="flex justify-end text-xs text-slate-500 tabular-nums">
+                        {wordCount} kata · {text.length} karakter
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
+                      {q.question_text}
+                    </h3>
+
+                    {q.indicator && (
+                      <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
+                    )}
+
+                    {hasMedia && (
+                      <QuestionMediaViewer items={mediaItems} layout={q.media_layout} />
+                    )}
+
+                    <textarea
+                      rows={5}
+                      value={text}
+                      onChange={(e) => handleAnswerChange(q.question_id, e.target.value)}
+                      placeholder="Tuliskan jawaban uraian Anda secara lengkap..."
+                      className="w-full rounded-lg border border-slate-300 px-3.5 py-3 text-sm leading-relaxed text-slate-900 focus:border-emerald-800 focus:outline-none"
+                    />
+
+                    <div className="flex justify-end text-xs text-slate-500 tabular-nums">
+                      {wordCount} kata · {text.length} karakter
+                    </div>
+                  </>
+                )}
               </div>
-
-              <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
-                {q.question_text}
-              </h3>
-
-              {q.indicator && (
-                <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
-              )}
-
-              <textarea
-                rows={5}
-                value={text}
-                onChange={(e) => handleAnswerChange(q.question_id, e.target.value)}
-                placeholder="Tuliskan jawaban uraian Anda secara lengkap..."
-                className="w-full rounded-lg border border-slate-300 px-3.5 py-3 text-sm leading-relaxed text-slate-900 focus:border-emerald-800 focus:outline-none"
-              />
-
-              <div className="flex justify-end text-xs text-slate-500 tabular-nums">
-                {wordCount} kata · {text.length} karakter
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Accessible Confirmation Modal (replacing window.confirm) */}
       {showConfirmModal && (

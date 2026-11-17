@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   LayoutDashboard,
   FileText,
@@ -29,9 +29,11 @@ import {
   deleteAdminUserSupabase,
   deleteQuestionSupabase,
   fetchExamDatabaseFromSupabase,
+  fetchStudentExamScopeFromSupabase,
   pushFullDatabaseToSupabase,
   resetSubmissionSupabase,
   subscribeExamSupabase,
+  subscribeStudentConfigSupabase,
   supabase,
   upsertAdminUserSupabase,
   upsertExamConfigSupabase,
@@ -117,14 +119,17 @@ export default function App() {
     'connected' | 'needs_schema' | 'empty' | 'error'
   >('needs_schema');
   const [syncError, setSyncError] = useState<string | null>(null);
+  const adminRefreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    // Jangan menimpa cache mirror penuh bila sedang login sebagai siswa (isolasi data)
+    if (session?.kind === 'student') return;
     try {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(db));
     } catch {
       // Ignore storage quota errors
     }
-  }, [db]);
+  }, [db, session?.kind]);
 
   useEffect(() => {
     try {
@@ -157,29 +162,116 @@ export default function App() {
     }
   }, []);
 
+  // Scoped Data & Realtime Subscription berdasarkan peran sesi aktif
   useEffect(() => {
-    refreshFromSupabase().catch(() => {
-      // Initial check may fail cleanly if schema.sql hasn't been executed yet
-    });
-
-    const channel = subscribeExamSupabase(() => {
-      fetchExamDatabaseFromSupabase()
-        .then((res) => {
-          if (res.data) {
-            setDb(res.data);
-            setSupabaseStatus('connected');
-            setSyncError(null);
+    // 1. Belum login: cek cepat exam_config (1 baris saja) agar halaman login langsung siap tanpa mengunduh seluruh database
+    if (!session) {
+      let active = true;
+      supabase
+        .from('exam_config')
+        .select('*')
+        .limit(1)
+        .then(({ data, error }) => {
+          if (!active) return;
+          if (error) {
+            const msg = error.message || String(error);
+            setSupabaseStatus(
+              msg.includes('table') || msg.includes('42P01') || msg.includes('PGRST205')
+                ? 'needs_schema'
+                : 'error'
+            );
+            return;
           }
+          if (!data || data.length === 0) {
+            setSupabaseStatus('empty');
+            return;
+          }
+          const cfgRow = data[0];
+          setSupabaseStatus('connected');
+          setDb((prev) => ({
+            ...prev,
+            config: {
+              exam_code: String(cfgRow.exam_code),
+              school_name: String(cfgRow.school_name),
+              exam_title: String(cfgRow.exam_title),
+              duration_minutes: Number(cfgRow.duration_minutes || 120),
+              max_score: Number(cfgRow.max_score || 100),
+              exam_open: Boolean(cfgRow.exam_open),
+              instructions: String(cfgRow.instructions || '')
+            }
+          }));
+        });
+      return () => {
+        active = false;
+      };
+    }
+
+    // 2. Sesi Siswa: Hanya tarik soal aktif (tanpa kunci jawaban) + jawaban dirinya sendiri,
+    // serta hanya langganan Realtime pada tabel exam_config (hemat kuota & tahan ratusan peserta).
+    if (session.kind === 'student') {
+      const st = session.student;
+      fetchStudentExamScopeFromSupabase(st.student_id, st.exam_code)
+        .then((scope) => {
+          setSupabaseStatus('connected');
+          setDb((prev) => ({
+            ...prev,
+            config: scope.config || prev.config,
+            questions:
+              Object.keys(scope.questions).length > 0 ? scope.questions : prev.questions,
+            responses: scope.myResponse
+              ? { [st.student_id]: scope.myResponse }
+              : prev.responses[st.student_id]
+              ? { [st.student_id]: prev.responses[st.student_id] }
+              : {},
+            students: { [st.student_id]: st },
+            grades: {},
+            admin_users: {}
+          }));
         })
         .catch(() => {
-          // Ignore realtime refresh failures when schema isn't ready
+          // Tetap izinkan fallback soal lokal bila schema belum disiapkan
         });
+
+      const studentChannel = subscribeStudentConfigSupabase(st.exam_code, (nextCfg) => {
+        setDb((prev) => ({ ...prev, config: nextCfg }));
+      });
+
+      return () => {
+        supabase.removeChannel(studentChannel);
+      };
+    }
+
+    // 3. Sesi Admin/Guru/Pengawas: Muat konsol lengkap dengan throttle 4 detik pada event Realtime
+    refreshFromSupabase().catch(() => {
+      // Ignore initial schema error cleanly
+    });
+
+    const adminChannel = subscribeExamSupabase(() => {
+      if (adminRefreshTimerRef.current) return;
+      adminRefreshTimerRef.current = window.setTimeout(() => {
+        adminRefreshTimerRef.current = null;
+        fetchExamDatabaseFromSupabase()
+          .then((res) => {
+            if (res.data) {
+              setDb(res.data);
+              setSupabaseStatus('connected');
+              setSyncError(null);
+            }
+          })
+          .catch(() => {
+            // Ignore realtime refresh errors
+          });
+      }, 4000);
     });
 
     return () => {
-      supabase.removeChannel(channel);
+      if (adminRefreshTimerRef.current) {
+        window.clearTimeout(adminRefreshTimerRef.current);
+        adminRefreshTimerRef.current = null;
+      }
+      supabase.removeChannel(adminChannel);
     };
-  }, [refreshFromSupabase]);
+  }, [session?.kind, session?.kind === 'student' ? session.student.student_id : '', refreshFromSupabase]);
 
   const currentAdminRole: AdminRole | null =
     session?.kind === 'admin' ? session.admin.role : null;
@@ -195,7 +287,7 @@ export default function App() {
     }
   }, [currentAdminRole, allowedTabs, activeTab]);
 
-  const syncRemote = async (operation: () => Promise<void>) => {
+  const syncRemote = async (operation: () => Promise<void>, propagateError = false) => {
     if (supabaseStatus !== 'connected' && supabaseStatus !== 'empty') return;
     try {
       await operation();
@@ -203,6 +295,7 @@ export default function App() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setSyncError(msg);
+      if (propagateError) throw err;
     }
   };
 
@@ -342,25 +435,40 @@ export default function App() {
     await syncRemote(() => deleteAdminUserSupabase(userId));
   };
 
-  const handleSaveStudentDraft = async (student: StudentRecord, answers: Record<string, string>) => {
+  // Simpan hanya butir soal yang berubah (dirty-only save) + propagasi error agar offline queue bisa retry otomatis
+  const handleSaveStudentDraft = async (
+    student: StudentRecord,
+    changedAnswers: Record<string, string>
+  ) => {
+    const existingResp = db.responses?.[student.student_id];
+    const mergedAnswers = {
+      ...(existingResp?.answers || {}),
+      ...changedAnswers
+    };
     const payload = {
       student_id: student.student_id,
       full_name: student.full_name,
       class_name: student.class_name,
       exam_code: student.exam_code,
       status: 'IN_PROGRESS' as const,
-      started_at: db.responses?.[student.student_id]?.started_at || new Date().toISOString(),
+      started_at: existingResp?.started_at || new Date().toISOString(),
       draft_updated_at: new Date().toISOString(),
-      answers
+      answers: mergedAnswers
     };
     setDb((prev) => ({
       ...prev,
       responses: { ...prev.responses, [student.student_id]: payload }
     }));
-    await syncRemote(() => upsertStudentAnswersSupabase(student, answers, 'IN_PROGRESS'));
+    await syncRemote(
+      () => upsertStudentAnswersSupabase(student, changedAnswers, 'IN_PROGRESS'),
+      true
+    );
   };
 
-  const handleSubmitStudentExam = async (student: StudentRecord, answers: Record<string, string>) => {
+  const handleSubmitStudentExam = async (
+    student: StudentRecord,
+    answers: Record<string, string>
+  ) => {
     const payload = {
       student_id: student.student_id,
       full_name: student.full_name,
@@ -391,8 +499,11 @@ export default function App() {
       <LoginPortal
         db={db}
         supabaseStatus={supabaseStatus}
-        onStudentAuthenticated={(student) => {
+        onStudentAuthenticated={(student, remoteConfig) => {
           setPreviewStudentMode(false);
+          if (remoteConfig) {
+            setDb((prev) => ({ ...prev, config: remoteConfig }));
+          }
           setSession({ kind: 'student', student });
         }}
         onAdminAuthenticated={(admin) => {
@@ -504,7 +615,6 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="no-print sticky top-0 z-30 border-b border-slate-200 bg-white">
         <div className="mx-auto flex h-14 max-w-[1440px] items-center justify-between gap-6 px-4 sm:px-6">
-          {/* Zone 1: Brand */}
           <div className="flex items-center gap-3 shrink-0">
             {!previewStudentMode && (
               <button
@@ -521,7 +631,6 @@ export default function App() {
             </span>
           </div>
 
-          {/* Zone 2: Center Primary Navigation Links */}
           <nav className="hidden md:flex items-center gap-5 text-sm font-medium text-slate-600">
             {previewStudentMode ? (
               <span className="text-sm text-slate-600 whitespace-nowrap">
@@ -545,7 +654,6 @@ export default function App() {
             )}
           </nav>
 
-          {/* Zone 3: Session User & Logout / Exit Preview */}
           <div className="flex items-center gap-3 shrink-0">
             <span className="hidden sm:inline text-xs font-medium text-slate-600 whitespace-nowrap">
               {admin.full_name} · {ROLE_LABELS[admin.role]}

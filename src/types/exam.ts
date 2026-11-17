@@ -28,6 +28,25 @@ export interface RubricCriterion {
   order_no: number;
 }
 
+export type QuestionMediaLayout = 'top' | 'side' | 'compare_ab' | 'gallery';
+
+export interface ImagePin {
+  id: string;
+  label: string;
+  x: number; // percentage 0..100
+  y: number; // percentage 0..100
+  note?: string;
+}
+
+export interface QuestionMediaItem {
+  id: string;
+  url: string;
+  caption?: string;
+  alt?: string;
+  label?: string;
+  pins?: ImagePin[];
+}
+
 export interface QuestionItem {
   question_id: string;
   exam_code: string;
@@ -41,6 +60,9 @@ export interface QuestionItem {
   max_score: number;
   order_no: number;
   active: boolean;
+  media_layout?: QuestionMediaLayout;
+  media_items?: QuestionMediaItem[];
+  answer_key_image_url?: string;
   rubrics: Record<string, RubricCriterion>;
 }
 

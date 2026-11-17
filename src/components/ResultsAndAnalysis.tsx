@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Download, Eye, Printer } from 'lucide-react';
 import { ExamDatabase } from '../types/exam';
 import { computeItemAnalysis, computeStudentResults, downloadCsv } from '../utils/examAnalytics';
+import { QuestionMediaViewer } from './QuestionMediaViewer';
 
 interface ResultsAndAnalysisProps {
   db: ExamDatabase;
@@ -388,6 +389,13 @@ export const ResultsAndAnalysis: React.FC<ResultsAndAnalysisProps> = ({ db }) =>
                           </span>
                         </div>
                         <div className="text-sm font-medium text-slate-800">{q.question_text}</div>
+                        {(q.media_items || []).length > 0 && (
+                          <QuestionMediaViewer
+                            items={q.media_items}
+                            layout={q.media_layout}
+                            compact
+                          />
+                        )}
                         <div className="rounded-lg bg-slate-50 p-3.5 text-sm text-slate-900 whitespace-pre-wrap leading-relaxed">
                           {ans || '(Tidak ada jawaban)'}
                         </div>

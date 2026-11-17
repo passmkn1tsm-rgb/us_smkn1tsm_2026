@@ -111,12 +111,38 @@ export const INITIAL_DATABASE: ExamDatabase = {
       indicator: 'Murid mampu menganalisis prinsip hierarki visual dan keterbacaan tipografi',
       topic: 'Tipografi & Tata Letak',
       question_text:
-        'Sebuah poster informasi keselamatan kerja memiliki terlalu banyak jenis huruf dekoratif dengan kontras warna teks abu-abu muda di atas latar kuning cerah. Analisis dua masalah komunikasi visual pada poster tersebut dan usulkan perbaikannya.',
+        'Perhatikan perbandingan dua rancangan poster keselamatan kerja di bawah ini (Poster A dan Poster B). Analisis dua masalah komunikasi visual pada Poster A berdasarkan area yang ditandai nomor 1 dan 2, lalu jelaskan mengapa Poster B lebih efektif!',
       answer_key:
-        'Masalah 1: Keterbacaan rendah karena rasio kontras warna buruk (foreground terang di atas latar terang). Masalah 2: Hierarki visual kacau akibat banyak huruf dekoratif. Perbaikan: Gunakan maksimal 2 keluarga huruf sans-serif tegas dan pastikan kontras gelap-terang tinggi.',
+        'Masalah 1 (Pin 1): Keterbacaan rendah karena rasio kontras warna teks abu-abu muda di atas latar kuning cerah sangat lemah. Masalah 2 (Pin 2): Hierarki visual kacau akibat huruf dekoratif berlebihan dan ukuran tidak proporsional. Poster B lebih efektif karena memakai maksimal 2 keluarga huruf sans-serif tegas dengan kontras hitam-kuning yang tinggi.',
       max_score: 15,
       order_no: 3,
       active: true,
+      media_layout: 'compare_ab',
+      media_items: [
+        {
+          id: 'Q003_IMG_A',
+          label: 'Poster A (Bermasalah)',
+          caption: 'Kontras warna teks lemah & banyak jenis huruf dekoratif',
+          alt: 'Contoh poster keselamatan kerja dengan kontras lemah dan huruf dekoratif',
+          url: `data:image/svg+xml;utf8,${encodeURIComponent(
+            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 260"><rect width="420" height="260" rx="8" fill="#fef08a"/><rect x="16" y="16" width="388" height="228" rx="6" fill="#fde047" stroke="#eab308" stroke-width="2"/><text x="210" y="64" text-anchor="middle" font-family="cursive, serif" font-size="22" font-style="italic" fill="#d4d4d8">Peringatan Keselamatan Kerja!!</text><text x="210" y="112" text-anchor="middle" font-family="fantasy, serif" font-size="14" fill="#e5e7eb">Wajib Memakai Helm &amp; Sarung Tangan</text><text x="210" y="150" text-anchor="middle" font-family="serif" font-size="16" fill="#cbd5e1">Area Bengkel Produksi DKV</text><text x="210" y="196" text-anchor="middle" font-family="cursive" font-size="13" fill="#d1d5db">Patuhi Aturan Sebelum Bekerja</text></svg>`
+          )}`,
+          pins: [
+            { id: 'P1', label: '1', x: 50, y: 24, note: 'Judul memakai font dekoratif & warna pudar' },
+            { id: 'P2', label: '2', x: 50, y: 58, note: 'Kontras teks abu-abu di atas kuning terlalu rendah' }
+          ]
+        },
+        {
+          id: 'Q003_IMG_B',
+          label: 'Poster B (Perbaikan)',
+          caption: 'Hierarki tipografi jelas & kontras warna gelap-terang tinggi',
+          alt: 'Contoh poster keselamatan kerja perbaikan dengan kontras tinggi',
+          url: `data:image/svg+xml;utf8,${encodeURIComponent(
+            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 260"><rect width="420" height="260" rx="8" fill="#facc15"/><rect x="16" y="16" width="388" height="58" rx="6" fill="#111827"/><text x="210" y="52" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="800" letter-spacing="1" fill="#facc15">KESELAMATAN KERJA</text><text x="210" y="114" text-anchor="middle" font-family="sans-serif" font-size="16" font-weight="700" fill="#111827">WAJIB MEMAKAI HELM &amp; PELINDUNG</text><line x1="60" y1="136" x2="360" y2="136" stroke="#111827" stroke-width="2"/><text x="210" y="170" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="600" fill="#1f2937">1. Cek kelistrikan sebelum menyalakan mesin</text><text x="210" y="200" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="600" fill="#1f2937">2. Gunakan area kerja sesuai standar K3</text></svg>`
+          )}`,
+          pins: []
+        }
+      ],
       rubrics: {
         R005: {
           rubric_id: 'R005',

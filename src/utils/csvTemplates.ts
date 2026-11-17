@@ -154,7 +154,11 @@ export function downloadQuestionsTemplate(examCode: string, delimiter: CsvDelimi
       'answer_key',
       'max_score',
       'order_no',
-      'active'
+      'active',
+      'media_layout',
+      'image_urls',
+      'image_captions',
+      'answer_key_image_url'
     ],
     [
       [
@@ -169,7 +173,11 @@ export function downloadQuestionsTemplate(examCode: string, delimiter: CsvDelimi
         'Dokumentasi revisi mencegah kesalahpahaman ruang lingkup kerja dan meminimalkan pengerjaan ulang.',
         10,
         4,
-        'TRUE'
+        'TRUE',
+        'top',
+        '',
+        '',
+        ''
       ]
     ],
     delimiter
@@ -383,6 +391,36 @@ export function parseQuestionsAndRubricsFromText(
         );
       }
 
+      const rawLayout = String(row[col('media_layout', 12)] || '').trim().toLowerCase();
+      const mediaLayout =
+        rawLayout === 'side' || rawLayout === 'compare_ab' || rawLayout === 'gallery'
+          ? rawLayout
+          : 'top';
+      const rawUrls = String(row[col('image_urls', 13)] || '').trim();
+      const rawCaptions = String(row[col('image_captions', 14)] || '').trim();
+      const urlParts = rawUrls
+        ? rawUrls
+            .split('|')
+            .map((u) => u.trim())
+            .filter(Boolean)
+        : [];
+      const captionParts = rawCaptions ? rawCaptions.split('|').map((c) => c.trim()) : [];
+      const mediaItems = urlParts.map((url, idx) => ({
+        id: `${qid}_IMG_${idx + 1}`,
+        url,
+        caption: captionParts[idx] || '',
+        label:
+          mediaLayout === 'compare_ab'
+            ? idx === 0
+              ? 'Gambar A'
+              : idx === 1
+              ? 'Gambar B'
+              : `Gambar ${idx + 1}`
+            : undefined,
+        pins: []
+      }));
+      const answerKeyImageUrl = String(row[col('answer_key_image_url', 15)] || '').trim();
+
       questions.push({
         question_id: qid,
         exam_code: String(row[col('exam_code', 1)] || defaultExamCode).trim() || defaultExamCode,
@@ -396,6 +434,10 @@ export function parseQuestionsAndRubricsFromText(
         max_score: maxScore,
         order_no: Math.max(1, Number(row[col('order_no', 10)] || i + 1)),
         active: activeRaw !== 'false' && activeRaw !== '0',
+        media_layout: mediaItems.length ? mediaLayout : existingQuestions[qid]?.media_layout || 'top',
+        media_items: mediaItems.length ? mediaItems : existingQuestions[qid]?.media_items || [],
+        answer_key_image_url:
+          answerKeyImageUrl || existingQuestions[qid]?.answer_key_image_url || undefined,
         rubrics
       });
     });

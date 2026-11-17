@@ -26,22 +26,30 @@ CREATE TABLE IF NOT EXISTS public.admin_users (
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- 2. Tabel Bank Soal Uraian (Pengganti sheet Questions)
+-- 2. Tabel Bank Soal Uraian (Pengganti sheet Questions + dukungan soal bergambar)
 CREATE TABLE IF NOT EXISTS public.questions (
-  question_id   text PRIMARY KEY,
-  exam_code     text NOT NULL REFERENCES public.exam_config(exam_code) ON DELETE CASCADE ON UPDATE CASCADE,
-  subject       text NOT NULL DEFAULT '',
-  class_name    text NOT NULL DEFAULT '',
-  competency    text NOT NULL DEFAULT '',
-  indicator     text NOT NULL DEFAULT '',
-  topic         text NOT NULL DEFAULT '',
-  question_text text NOT NULL,
-  answer_key    text NOT NULL DEFAULT '',
-  max_score     numeric(8,2) NOT NULL DEFAULT 10,
-  order_no      integer NOT NULL DEFAULT 1,
-  active        boolean NOT NULL DEFAULT true,
-  created_at    timestamptz NOT NULL DEFAULT now()
+  question_id           text PRIMARY KEY,
+  exam_code             text NOT NULL REFERENCES public.exam_config(exam_code) ON DELETE CASCADE ON UPDATE CASCADE,
+  subject               text NOT NULL DEFAULT '',
+  class_name            text NOT NULL DEFAULT '',
+  competency            text NOT NULL DEFAULT '',
+  indicator             text NOT NULL DEFAULT '',
+  topic                 text NOT NULL DEFAULT '',
+  question_text         text NOT NULL,
+  answer_key            text NOT NULL DEFAULT '',
+  max_score             numeric(8,2) NOT NULL DEFAULT 10,
+  order_no              integer NOT NULL DEFAULT 1,
+  active                boolean NOT NULL DEFAULT true,
+  media_layout          text NOT NULL DEFAULT 'top',
+  media_items           jsonb NOT NULL DEFAULT '[]'::jsonb,
+  answer_key_image_url  text NOT NULL DEFAULT '',
+  created_at            timestamptz NOT NULL DEFAULT now()
 );
+
+-- Migrasi aman bila tabel questions sudah ada sebelumnya
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS media_layout text NOT NULL DEFAULT 'top';
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS media_items jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS answer_key_image_url text NOT NULL DEFAULT '';
 
 -- 3. Tabel Rubrik Penilaian (Pengganti sheet Rubrics)
 CREATE TABLE IF NOT EXISTS public.rubrics (
@@ -124,6 +132,46 @@ AS $$
   LIMIT 1;
 $$;
 
+-- Fungsi RPC Khusus Siswa: Hanya mengambil soal aktif TANPA mengirim answer_key (kunci jawaban)
+CREATE OR REPLACE FUNCTION public.get_student_exam_questions(p_exam_code text)
+RETURNS TABLE (
+  question_id text,
+  exam_code text,
+  subject text,
+  class_name text,
+  competency text,
+  indicator text,
+  topic text,
+  question_text text,
+  max_score numeric,
+  order_no integer,
+  active boolean,
+  media_layout text,
+  media_items jsonb
+)
+LANGUAGE sql
+SECURITY DEFINER
+AS $$
+  SELECT
+    q.question_id,
+    q.exam_code,
+    q.subject,
+    q.class_name,
+    q.competency,
+    q.indicator,
+    q.topic,
+    q.question_text,
+    q.max_score,
+    q.order_no,
+    q.active,
+    q.media_layout,
+    q.media_items
+  FROM public.questions q
+  WHERE q.exam_code = trim(p_exam_code)
+    AND q.active = true
+  ORDER BY q.order_no ASC;
+$$;
+
 -- View Rekap Nilai Otomatis (Langsung bisa dilihat di Table Editor Supabase)
 CREATE OR REPLACE VIEW public.v_student_scores AS
 SELECT
@@ -148,6 +196,27 @@ LEFT JOIN public.grades g
 WHERE s.active = true
 GROUP BY s.student_id, s.full_name, s.class_name, s.exam_code;
 
+-- Bucket Supabase Storage untuk Gambar Soal Ujian (exam-images)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('exam-images', 'exam-images', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+DROP POLICY IF EXISTS "public_read_exam_images" ON storage.objects;
+CREATE POLICY "public_read_exam_images" ON storage.objects
+  FOR SELECT USING (bucket_id = 'exam-images');
+
+DROP POLICY IF EXISTS "allow_upload_exam_images" ON storage.objects;
+CREATE POLICY "allow_upload_exam_images" ON storage.objects
+  FOR INSERT WITH CHECK (bucket_id = 'exam-images');
+
+DROP POLICY IF EXISTS "allow_update_exam_images" ON storage.objects;
+CREATE POLICY "allow_update_exam_images" ON storage.objects
+  FOR UPDATE USING (bucket_id = 'exam-images');
+
+DROP POLICY IF EXISTS "allow_delete_exam_images" ON storage.objects;
+CREATE POLICY "allow_delete_exam_images" ON storage.objects
+  FOR DELETE USING (bucket_id = 'exam-images');
+
 -- Aktifkan Supabase Realtime pada seluruh tabel ujian
 DO $$
 DECLARE
@@ -169,9 +238,6 @@ END $$;
 
 -- ============================================================================
 -- ROW LEVEL SECURITY (RLS)
--- Catatan: Kebijakan di bawah mengizinkan akses langsung melalui client key
--- untuk kemudahan sinkronisasi awal & uji coba. Sebelum ujian resmi, batasi
--- operasi tulis/baca guru menggunakan Supabase Auth (auth.jwt() ->> 'email').
 -- ============================================================================
 ALTER TABLE public.exam_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.admin_users ENABLE ROW LEVEL SECURITY;

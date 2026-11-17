@@ -13,6 +13,7 @@ import {
   downloadOfflineGradingTemplate,
   parseOfflineGradesFromText
 } from '../utils/csvTemplates';
+import { QuestionMediaViewer } from './QuestionMediaViewer';
 
 interface GradingWorkspaceProps {
   db: ExamDatabase;
@@ -342,10 +343,39 @@ export const GradingWorkspace: React.FC<GradingWorkspaceProps> = ({
                 {currentItem.questionText}
               </div>
 
-              {showAnswerKey && currentItem.answerKey && (
-                <div className="rounded-lg bg-slate-50 p-3.5 text-xs text-slate-700 leading-relaxed">
-                  <span className="font-semibold text-slate-900">Acuan Jawaban Ideal: </span>
-                  {currentItem.answerKey}
+              {currentQuestion && (currentQuestion.media_items || []).length > 0 && (
+                <QuestionMediaViewer
+                  items={currentQuestion.media_items}
+                  layout={currentQuestion.media_layout}
+                  compact
+                />
+              )}
+
+              {showAnswerKey && (currentItem.answerKey || currentQuestion?.answer_key_image_url) && (
+                <div className="rounded-lg bg-slate-50 p-3.5 text-xs text-slate-700 leading-relaxed space-y-2">
+                  {currentItem.answerKey && (
+                    <div>
+                      <span className="font-semibold text-slate-900">Acuan Jawaban Ideal: </span>
+                      {currentItem.answerKey}
+                    </div>
+                  )}
+                  {currentQuestion?.answer_key_image_url && (
+                    <div>
+                      <div className="font-semibold text-slate-900 mb-1">
+                        Gambar Referensi Kunci:
+                      </div>
+                      <QuestionMediaViewer
+                        items={[
+                          {
+                            id: `${currentItem.questionId}_KEY_IMG`,
+                            url: currentQuestion.answer_key_image_url,
+                            label: 'Referensi Kunci Jawaban'
+                          }
+                        ]}
+                        compact
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>

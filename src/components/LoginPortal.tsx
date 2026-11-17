@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
 import { ShieldCheck, GraduationCap, AlertTriangle, Lock } from 'lucide-react';
-import { AdminUser, ExamDatabase, StudentRecord } from '../types/exam';
-import { verifyAdminLoginSupabase } from '../services/supabaseService';
+import { AdminUser, ExamConfig, ExamDatabase, StudentRecord } from '../types/exam';
+import {
+  verifyAdminLoginSupabase,
+  verifyStudentLoginSupabase
+} from '../services/supabaseService';
 
 interface LoginPortalProps {
   db: ExamDatabase;
   supabaseStatus: 'connected' | 'needs_schema' | 'empty' | 'error';
-  onStudentAuthenticated: (student: StudentRecord) => void;
+  onStudentAuthenticated: (student: StudentRecord, remoteConfig?: ExamConfig) => void;
   onAdminAuthenticated: (admin: Omit<AdminUser, 'access_pin'>) => void;
 }
 
@@ -30,7 +33,7 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const handleStudentSubmit = (e: React.FormEvent) => {
+  const handleStudentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
 
@@ -42,30 +45,62 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
       setErrorMsg('Lengkapi NIS/NISN, kode akses, dan kode ujian.');
       return;
     }
-    if (!db.config.exam_open) {
-      setErrorMsg('Ujian saat ini belum dibuka oleh guru atau pengawas.');
-      return;
-    }
-    if (ecode !== db.config.exam_code) {
-      setErrorMsg('Kode ujian tidak sesuai.');
-      return;
-    }
 
-    const found = db.students?.[sid];
-    if (!found || !found.active || found.access_code !== code || found.exam_code !== ecode) {
-      setErrorMsg('NIS/NISN atau kode akses peserta tidak valid.');
-      return;
-    }
+    setLoading(true);
+    try {
+      // 1. Verifikasi terindeks langsung ke Supabase (1 baris siswa + config ujian)
+      if (supabaseStatus === 'connected') {
+        try {
+          const remote = await verifyStudentLoginSupabase(sid, code, ecode);
+          if (!remote) {
+            setErrorMsg('NIS/NISN, kode akses, atau kode ujian tidak sesuai.');
+            return;
+          }
+          if (!remote.config.exam_open) {
+            setErrorMsg('Ujian saat ini belum dibuka oleh guru atau pengawas.');
+            return;
+          }
+          if (remote.alreadySubmitted) {
+            setErrorMsg(
+              'Jawaban ujian Anda sudah dikirim sebelumnya. Hubungi pengawas jika membutuhkan pembukaan kunci.'
+            );
+            return;
+          }
+          onStudentAuthenticated(remote.student, remote.config);
+          return;
+        } catch {
+          // Fallback ke pengecekan lokal jika tabel/RPC belum siap
+        }
+      }
 
-    const existing = db.responses?.[sid];
-    if (existing && existing.status === 'SUBMITTED') {
-      setErrorMsg(
-        'Jawaban ujian Anda sudah dikirim sebelumnya. Hubungi pengawas jika membutuhkan pembukaan kunci.'
-      );
-      return;
-    }
+      // 2. Fallback lokal
+      if (!db.config.exam_open) {
+        setErrorMsg('Ujian saat ini belum dibuka oleh guru atau pengawas.');
+        return;
+      }
+      if (ecode !== db.config.exam_code) {
+        setErrorMsg('Kode ujian tidak sesuai.');
+        return;
+      }
 
-    onStudentAuthenticated(found);
+      const found = db.students?.[sid];
+      if (!found || !found.active || found.access_code !== code || found.exam_code !== ecode) {
+        setErrorMsg('NIS/NISN atau kode akses peserta tidak valid.');
+        return;
+      }
+
+      const existing = db.responses?.[sid];
+      if (existing && existing.status === 'SUBMITTED') {
+        setErrorMsg(
+          'Jawaban ujian Anda sudah dikirim sebelumnya. Hubungi pengawas jika membutuhkan pembukaan kunci.'
+        );
+        return;
+      }
+
+      onStudentAuthenticated(found);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleAdminSubmit = async (e: React.FormEvent) => {
@@ -260,9 +295,10 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
 
                 <button
                   type="submit"
-                  className="rounded-lg bg-emerald-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-emerald-800 transition-colors cursor-pointer"
+                  disabled={loading}
+                  className="rounded-lg bg-emerald-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-60 transition-colors cursor-pointer"
                 >
-                  Masuk &amp; Mulai Ujian
+                  {loading ? 'Memeriksa...' : 'Masuk & Mulai Ujian'}
                 </button>
               </div>
             </form>
