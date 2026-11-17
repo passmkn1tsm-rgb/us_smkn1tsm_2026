@@ -1,0 +1,6 @@
+{
+  "name": "Ujian Sekolah XII — Konsol & Supabase PostgreSQL",
+  "description": "Aplikasi pengelolaan ujian uraian berbasis rubrik, koreksi cepat, analisis butir soal psikometrik, dan sinkronisasi Supabase PostgreSQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

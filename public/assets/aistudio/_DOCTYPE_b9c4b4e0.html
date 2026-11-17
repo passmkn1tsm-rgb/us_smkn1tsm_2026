@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    :root{--green:#1f4d3a;--orange:#e58b2a;--bg:#f4f7f5;--ink:#17231d;--line:#dbe4de}
+    *{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--ink)}
+    header{background:var(--green);color:white;padding:18px 22px}header h1{margin:0;font-size:21px}header p{margin:6px 0 0;color:#e7f2eb}
+    main{max-width:1100px;margin:22px auto;padding:0 14px}.card{background:white;border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 2px 8px #1231}
+    h2{font-size:18px;margin-top:0}label{display:block;font-size:13px;font-weight:bold;margin:12px 0 6px}
+    input,textarea,select{width:100%;padding:11px;border:1px solid #bdcbc2;border-radius:8px;font:inherit;background:white}
+    textarea{min-height:130px;resize:vertical}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    button{border:0;border-radius:8px;background:var(--green);color:white;padding:11px 15px;font-weight:bold;cursor:pointer;margin:8px 6px 0 0}
+    button.secondary{background:#e7eee9;color:var(--green)}button.orange{background:var(--orange);color:#211}
+    .muted{color:#65746b;font-size:13px}.hidden{display:none!important}.notice{padding:12px;border-radius:8px;background:#fff4dc;margin:12px 0;white-space:pre-wrap}
+    .question{border:1px solid var(--line);border-radius:10px;padding:14px;margin:12px 0}.qtitle{font-weight:bold;margin-bottom:8px}
+    table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:#edf4ef}
+    .tablewrap{overflow:auto}.pill{display:inline-block;padding:4px 8px;background:#e5f2e8;border-radius:20px;font-size:12px}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.stat{padding:13px;border-radius:10px;background:#edf4ef}.stat b{font-size:22px;display:block}
+    @media(max-width:650px){.grid,.stats{grid-template-columns:1fr 1fr}header h1{font-size:18px}}
+  </style>
+</head>
+<body>
+<header><h1 id="school">Ujian Sekolah Kelas XII</h1><p>Soal uraian • Penilaian rubrik • Analisis butir soal</p></header>
+<main>
+  <div id="message" class="notice hidden"></div>
+  <section class="card" id="home">
+    <h2>Masuk Ujian</h2><p class="muted">Masukkan identitas sesuai daftar peserta yang diberikan sekolah.</p>
+    <div class="grid">
+      <div><label>NIS/NISN atau ID Peserta</label><input id="studentId" autocomplete="username"></div>
+      <div><label>Kode akses</label><input id="accessCode" type="password" autocomplete="current-password"></div>
+      <div><label>Kode ujian</label><input id="examCode"></div>
+    </div>
+    <button onclick="loginStudent()">Masuk dan mulai</button>
+    <button class="secondary" onclick="showTeacher()">Dashboard Guru</button>
+  </section>
+
+  <section class="card hidden" id="exam">
+    <h2 id="examTitle">Ujian</h2><div id="studentInfo" class="muted"></div>
+    <div id="instructions" class="notice"></div>
+    <div><b>Waktu tersisa: <span id="timer">--:--</span></b></div>
+    <form id="answerForm" onsubmit="return false"><div id="questions"></div>
+      <p class="muted">Pastikan koneksi internet stabil. Jangan menutup halaman sebelum jawaban dikirim dan konfirmasi muncul.</p>
+      <button class="orange" onclick="confirmSubmit()">Kirim semua jawaban</button>
+    </form>
+  </section>
+
+  <section class="card hidden" id="submitted">
+    <h2>Jawaban Terkirim</h2><p id="submitText"></p><p class="muted">Nilai tidak ditampilkan kepada murid pada halaman ini. Hubungi guru sesuai prosedur sekolah.</p>
+  </section>
+
+  <section class="card hidden" id="teacher">
+    <h2>Dashboard Guru</h2>
+    <p class="muted">Dashboard hanya dapat dibuka oleh akun yang tercantum pada Script Properties TEACHER_EMAILS.</p>
+    <button onclick="loadDashboard()">Muat data</button>
+    <button class="secondary" onclick="setOpen(true)">Buka ujian</button>
+    <button class="secondary" onclick="setOpen(false)">Tutup ujian</button>
+    <button class="secondary" onclick="loadResults()">Rekap nilai</button>
+    <button class="secondary" onclick="loadGrading()">Koreksi jawaban</button>
+    <button class="secondary" onclick="loadAnalysis()">Analisis butir soal</button>
+    <div id="stats" class="stats"></div><div id="teacherData"></div>
+  </section>
+</main>
+<script>
+let sessionData=null, timerInterval=null, remaining=0;
+function msg(t){const el=document.getElementById('message');el.textContent=t;el.classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});}
+function clearMsg(){document.getElementById('message').classList.add('hidden');}
+function hideAll(){['home','exam','submitted','teacher'].forEach(id=>document.getElementById(id).classList.add('hidden'));clearMsg();}
+function callServer(fn,args,success){clearMsg();google.script.run.withSuccessHandler(success).withFailureHandler(e=>msg(e.message||String(e)))[fn](...args);}
+function loginStudent(){
+  callServer('studentLogin',[document.getElementById('studentId').value,document.getElementById('accessCode').value,document.getElementById('examCode').value],data=>{
+    sessionData=data;hideAll();document.getElementById('exam').classList.remove('hidden');
+    document.getElementById('examTitle').textContent=data.exam.title;
+    document.getElementById('studentInfo').textContent=data.student.name+' • '+data.student.id+' • '+data.student.className;
+    document.getElementById('instructions').textContent=data.exam.instructions||'Kerjakan seluruh soal dengan mandiri.';
+    const box=document.getElementById('questions');box.innerHTML='';
+    data.questions.forEach((q,i)=>{
+      const div=document.createElement('div');div.className='question';
+      const title=document.createElement('div');title.className='qtitle';title.textContent=(i+1)+'. '+q.text+' (Skor maksimum: '+q.maxScore+')';div.appendChild(title);
+      if(q.indicator){const p=document.createElement('p');p.className='muted';p.textContent='';div.appendChild(p);}
+      const ta=document.createElement('textarea');ta.id='answer_'+q.id;ta.placeholder='Tuliskan jawaban Anda di sini';ta.required=true;div.appendChild(ta);box.appendChild(div);
+    });
+    remaining=data.exam.duration*60;startTimer();
+  });
+}
+function startTimer(){if(timerInterval)clearInterval(timerInterval);renderTimer();timerInterval=setInterval(()=>{remaining--;renderTimer();if(remaining<=0){clearInterval(timerInterval);msg('Waktu habis. Sistem mencoba mengirim jawaban yang telah ditulis.');submitNow();}},1000);}
+function renderTimer(){document.getElementById('timer').textContent=Math.floor(Math.max(0,remaining)/60).toString().padStart(2,'0')+':'+(Math.max(0,remaining)%60).toString().padStart(2,'0');}
+function confirmSubmit(){if(confirm('Kirim semua jawaban sekarang? Setelah dikirim, jawaban tidak dapat diubah dari halaman ini.'))submitNow();}
+function submitNow(){
+  if(!sessionData)return;const answers={};sessionData.questions.forEach(q=>answers[q.id]=document.getElementById('answer_'+q.id).value);
+  callServer('submitAnswers',[sessionData.token,answers],r=>{if(timerInterval)clearInterval(timerInterval);hideAll();document.getElementById('submitted').classList.remove('hidden');document.getElementById('submitText').textContent=r.message;sessionData=null;});
+}
+function showTeacher(){hideAll();document.getElementById('teacher').classList.remove('hidden');}
+function loadDashboard(){callServer('getTeacherDashboard',[],d=>{
+  const c=d.counts;document.getElementById('stats').innerHTML='';
+  [['Soal aktif',c.questions],['Peserta aktif',c.students],['Peserta mengirim',c.submittedStudents],['Baris jawaban',c.responseRows]].forEach(a=>{const x=document.createElement('div');x.className='stat';const b=document.createElement('b');b.textContent=a[1];x.appendChild(b);x.appendChild(document.createTextNode(a[0]));document.getElementById('stats').appendChild(x);});
+  document.getElementById('teacherData').innerHTML='<p class="muted">Akun guru: '+escapeHtml(d.email)+' • Status ujian: '+escapeHtml(d.config.exam_open||'')+'</p><p>Untuk koreksi, buka sheet Responses untuk membaca jawaban, lalu gunakan rubrik di sheet Rubrics. Fitur input nilai per aspek tersedia melalui fungsi gradeResponse() yang dapat dipanggil dari antarmuka lanjutan.</p>';
+});}
+function setOpen(value){callServer('setExamOpen',[value],r=>{msg(value?'Ujian dibuka.':'Ujian ditutup.');loadDashboard();});}
+function loadResults(){callServer('getStudentResults',[],rows=>renderTable('Rekap Nilai',rows,[['Nama','name'],['ID Peserta','studentId'],['Kelas','className'],['Kode Ujian','examCode'],['Nilai','score'],['Status','status']]));}
+function loadAnalysis(){callServer('exportReportData',[],d=>renderTable('Analisis Butir Soal',d.analysis,[['ID Soal','questionId'],['Mata Pelajaran','subject'],['Indikator','indicator'],['Jumlah terkoreksi','graded'],['Rata-rata skor','meanScore'],['Capaian indikator (%)','indicatorAttainment'],['Indeks kesukaran','difficulty'],['Kategori','difficultyLabel'],['Daya pembeda','discrimination'],['Rekomendasi','recommendation']]));}
+
+function loadGrading(){
+ callServer('getUngradedResponses',[],rows=>{
+   const wrap=document.getElementById('teacherData');wrap.innerHTML='';
+   const h=document.createElement('h3');h.textContent='Koreksi Jawaban Uraian';wrap.appendChild(h);
+   if(!rows.length){wrap.appendChild(document.createTextNode('Tidak ada jawaban yang menunggu koreksi atau rubrik belum disiapkan.'));return;}
+   const sel=document.createElement('select');sel.id='responseSelect';
+   rows.forEach((r,i)=>{const o=document.createElement('option');o.value=i;o.textContent=r.fullName+' • '+r.className+' • '+r.questionId;sel.appendChild(o);});
+   wrap.appendChild(sel);
+   const panel=document.createElement('div');panel.id='gradingPanel';panel.className='question';wrap.appendChild(panel);
+   const render=()=>{
+     const r=rows[Number(sel.value)];panel.innerHTML='';
+     const q=document.createElement('p');q.textContent='Soal: '+r.questionText;panel.appendChild(q);
+     const ans=document.createElement('div');ans.className='notice';ans.textContent='Jawaban murid: '+(r.answerText||'(kosong)');panel.appendChild(ans);
+     callServer('getRubrics',[r.questionId],rubrics=>{
+       panel.querySelectorAll('.rubric-row').forEach(x=>x.remove());
+       if(!rubrics.length){msg('Rubrik belum tersedia untuk '+r.questionId);return;}
+       const scoreInputs={};
+       rubrics.forEach(rb=>{
+         const row=document.createElement('div');row.className='rubric-row';
+         const label=document.createElement('label');label.textContent=rb.criterion+' — '+rb.description+' (maks. '+rb.max_points+')';row.appendChild(label);
+         const inp=document.createElement('input');inp.type='number';inp.min='0';inp.max=rb.max_points;inp.step='0.5';inp.value='0';row.appendChild(inp);
+         scoreInputs[rb.rubric_id]=inp;panel.appendChild(row);
+       });
+       const fbLabel=document.createElement('label');fbLabel.textContent='Umpan balik guru';panel.appendChild(fbLabel);
+       const fb=document.createElement('textarea');fb.placeholder='Catatan singkat untuk perbaikan jawaban';fb.style.minHeight='70px';panel.appendChild(fb);
+       const btn=document.createElement('button');btn.textContent='Simpan skor rubrik';btn.onclick=()=>{
+         const scores={};let valid=true;
+         Object.keys(scoreInputs).forEach(id=>{const n=Number(scoreInputs[id].value);if(!Number.isFinite(n)||n<0||n>Number(scoreInputs[id].max))valid=false;scores[id]=n;});
+         if(!valid){msg('Periksa skor: harus di antara 0 dan skor maksimum rubrik.');return;}
+         callServer('gradeResponse',[r.studentId,r.examCode,r.questionId,scores,fb.value],result=>{
+           msg('Skor tersimpan: '+result.questionScore+' dari '+result.questionMax+'.');
+           loadGrading();
+         });
+       };panel.appendChild(btn);
+     });
+   };
+   sel.onchange=render;render();
+ });
+}
+function renderTable(title,rows,cols){const wrap=document.getElementById('teacherData');wrap.innerHTML='';const h=document.createElement('h3');h.textContent=title;wrap.appendChild(h);if(!rows.length){wrap.appendChild(document.createTextNode('Belum ada data.'));return;}
+ const div=document.createElement('div');div.className='tablewrap';const table=document.createElement('table'),thead=document.createElement('thead'),tr=document.createElement('tr');
+ cols.forEach(c=>{const th=document.createElement('th');th.textContent=c[0];tr.appendChild(th);});thead.appendChild(tr);table.appendChild(thead);const tbody=document.createElement('tbody');
+ rows.forEach(row=>{const tr=document.createElement('tr');cols.forEach(c=>{const td=document.createElement('td');td.textContent=row[c[1]]===undefined?'':String(row[c[1]]);tr.appendChild(td);});tbody.appendChild(tr);});table.appendChild(tbody);div.appendChild(table);wrap.appendChild(div);}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+callServer('getPublicInfo',[],d=>{document.getElementById('school').textContent=d.schoolName+' — '+d.examTitle;document.getElementById('examCode').value=d.examCode;});
+</script>
+</body>
+</html>
