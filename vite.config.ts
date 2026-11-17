@@ -5,7 +5,17 @@ import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
+  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || '').split('/');
+  const isUserSite =
+    Boolean(repoOwner && repoName) &&
+    repoName.toLowerCase() === `${repoOwner.toLowerCase()}.github.io`;
+  const base =
+    process.env.GITHUB_ACTIONS === 'true' && repoName && !isUserSite
+      ? `/${repoName}/`
+      : '/';
+
   return {
+    base,
     plugins: [
       react(),
       tailwindcss(),
