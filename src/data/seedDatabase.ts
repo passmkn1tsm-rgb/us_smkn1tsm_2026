@@ -8,35 +8,14 @@ export const INITIAL_DATABASE: ExamDatabase = {
     duration_minutes: 120,
     max_score: 100,
     exam_open: true,
+    strict_focus: true,
+    block_copy_paste: false,
     instructions:
       'Bacalah setiap soal uraian dengan cermat. Tuliskan argumen beserta bukti atau alasan yang logis. Jawaban tersimpan otomatis sebagai draf selama ujian berlangsung.'
   },
-  admin_users: {
-    ADM001: {
-      user_id: 'ADM001',
-      email: 'passmkn1tsm@gmail.com',
-      full_name: 'Administrator Utama',
-      role: 'super_admin',
-      access_pin: 'admin123',
-      active: true
-    },
-    ADM002: {
-      user_id: 'ADM002',
-      email: 'guru1@smkn1tsm.sch.id',
-      full_name: 'Guru Mata Pelajaran',
-      role: 'teacher',
-      access_pin: 'guru123',
-      active: true
-    },
-    ADM003: {
-      user_id: 'ADM003',
-      email: 'pengawas1@smkn1tsm.sch.id',
-      full_name: 'Pengawas Ruang Ujian',
-      role: 'proctor',
-      access_pin: 'pengawas123',
-      active: true
-    }
-  },
+  // Kredensial Admin/Guru/Pengawas tidak disimpan di kode client demi keamanan.
+  // Kelola akun & PIN pengelola langsung di database Supabase melalui schema.sql / menu Hak Akses.
+  admin_users: {},
   questions: {
     Q001: {
       question_id: 'Q001',

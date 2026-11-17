@@ -6,8 +6,16 @@ import { QuestionMediaViewer } from './QuestionMediaViewer';
 interface StudentExamPortalProps {
   db: ExamDatabase;
   initialStudent?: StudentRecord | null;
-  onSaveDraft: (student: StudentRecord, changedAnswers: Record<string, string>) => Promise<void>;
-  onSubmitExam: (student: StudentRecord, answers: Record<string, string>) => Promise<void>;
+  onSaveDraft: (
+    student: StudentRecord,
+    changedAnswers: Record<string, string>,
+    focusViolations: number
+  ) => Promise<void>;
+  onSubmitExam: (
+    student: StudentRecord,
+    answers: Record<string, string>,
+    focusViolations: number
+  ) => Promise<void>;
   onLogout?: () => void;
 }
 
@@ -50,6 +58,12 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
     return initialAnswers;
   });
 
+  const [focusViolations, setFocusViolations] = useState<number>(() =>
+    initialStudent ? Number(db.responses?.[initialStudent.student_id]?.focus_violations || 0) : 0
+  );
+  const [focusWarning, setFocusWarning] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
+
   const [remainingSeconds, setRemainingSeconds] = useState(() =>
     initialStudent ? Number(db.config.duration_minutes || 120) * 60 : 0
   );
@@ -67,12 +81,18 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
   const dirtyQuestionIdsRef = useRef<Set<string>>(new Set());
   const latestAnswersRef = useRef<Record<string, string>>(answers);
   latestAnswersRef.current = answers;
+  const focusViolationsRef = useRef<number>(focusViolations);
+  focusViolationsRef.current = focusViolations;
+  const lastViolationTsRef = useRef<number>(0);
 
   const activeQuestions = Object.values(db.questions || {})
     .filter((q) => q.active && q.exam_code === db.config.exam_code)
     .sort((a, b) => a.order_no - b.order_no);
 
-  // Restore remote answers when scope loads after initialStudent login
+  const strictFocusEnabled = db.config.strict_focus !== false;
+  const blockCopyPasteEnabled = Boolean(db.config.block_copy_paste);
+
+  // Restore remote answers & focus violation counter when scope loads after initialStudent login
   useEffect(() => {
     if (!initialStudent) return;
     setActiveStudent(initialStudent);
@@ -102,6 +122,12 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
       return merged;
     });
 
+    const remoteViolations = Number(existingResp?.focus_violations || 0);
+    if (remoteViolations > focusViolationsRef.current) {
+      focusViolationsRef.current = remoteViolations;
+      setFocusViolations(remoteViolations);
+    }
+
     if (existingResp?.draft_updated_at && !draftSavedAt) {
       setDraftSavedAt('Draf sebelumnya dipulihkan');
     }
@@ -118,7 +144,7 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
       });
 
       try {
-        await onSaveDraft(student, changedOnly);
+        await onSaveDraft(student, changedOnly, focusViolationsRef.current);
         dirtyIds.forEach((qid) => dirtyQuestionIdsRef.current.delete(qid));
         setSyncPendingOffline(false);
         const now = new Date();
@@ -135,6 +161,49 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
     },
     [onSaveDraft]
   );
+
+  // Mode Fokus Ujian: deteksi perpindahan tab atau jendela browser dengan debounce anti-double-count
+  useEffect(() => {
+    if (!activeStudent || submittedAt || !strictFocusEnabled) return;
+
+    const recordFocusLeave = () => {
+      const now = Date.now();
+      if (now - lastViolationTsRef.current < 1500) return;
+      lastViolationTsRef.current = now;
+
+      const nextCount = focusViolationsRef.current + 1;
+      focusViolationsRef.current = nextCount;
+      setFocusViolations(nextCount);
+      setFocusWarning(
+        `Peringatan Fokus: Terdeteksi meninggalkan halaman ujian (${nextCount}x). Aktivitas ini tercatat untuk guru dan pengawas.`
+      );
+
+      // Pastikan catatan perpindahan tab langsung tersimpan ke server bersama draf
+      if (dirtyQuestionIdsRef.current.size === 0 && activeQuestions.length > 0) {
+        dirtyQuestionIdsRef.current.add(activeQuestions[0].question_id);
+      }
+      if (dirtyQuestionIdsRef.current.size > 0) {
+        flushDirtyDrafts(activeStudent);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        recordFocusLeave();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      recordFocusLeave();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
+  }, [activeStudent, submittedAt, strictFocusEnabled, activeQuestions.length, flushDirtyDrafts]);
 
   // Otomatis sinkronkan ulang begitu Wi-Fi/sinyal siswa terhubung kembali
   useEffect(() => {
@@ -205,6 +274,12 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
       restoredAnswers[q.question_id] = existingResp?.answers?.[q.question_id] || '';
     });
 
+    const initialViolations = Number(existingResp?.focus_violations || 0);
+    focusViolationsRef.current = initialViolations;
+    setFocusViolations(initialViolations);
+    setFocusWarning(null);
+    setCopyNotice(null);
+
     dirtyQuestionIdsRef.current.clear();
     setAnswers(restoredAnswers);
     setActiveStudent(found);
@@ -250,7 +325,7 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
     }
     setSubmitting(true);
     try {
-      await onSubmitExam(activeStudent, latestAnswersRef.current);
+      await onSubmitExam(activeStudent, latestAnswersRef.current, focusViolationsRef.current);
       dirtyQuestionIdsRef.current.clear();
       setSyncPendingOffline(false);
       try {
@@ -267,10 +342,16 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
     }
   };
 
-  const fillDemoCredentials = () => {
-    setStudentIdInput('CONTOH001');
-    setAccessCodeInput('123456');
-    setExamCodeInput(db.config.exam_code);
+  const handleBlockedQuestionCopy = (e: React.SyntheticEvent) => {
+    if (!blockCopyPasteEnabled) return;
+    e.preventDefault();
+    setCopyNotice('Menyalin naskah soal dinonaktifkan selama ujian berlangsung.');
+  };
+
+  const handleBlockedPaste = (e: React.SyntheticEvent) => {
+    if (!blockCopyPasteEnabled) return;
+    e.preventDefault();
+    setCopyNotice('Menempel (paste) teks dari luar ke lembar jawaban dinonaktifkan.');
   };
 
   const formatTimer = (sec: number) => {
@@ -322,8 +403,8 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
             Pratinjau Ujian Peserta
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Masukkan NIS/NISN, kode akses pribadi, dan kode ujian untuk menguji tampilan lembar
-            soal bergambar sebagai peserta.
+            Masukkan NIS/NISN, kode akses pribadi, dan kode ujian dari daftar peserta untuk
+            menguji tampilan lembar soal sebagai siswa.
           </p>
         </div>
 
@@ -351,7 +432,7 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
               type="text"
               value={studentIdInput}
               onChange={(e) => setStudentIdInput(e.target.value)}
-              placeholder="Contoh: CONTOH001"
+              placeholder="Masukkan NIS / NISN peserta"
               className="w-full rounded-lg border border-slate-300 px-3 py-2.5 font-mono text-sm focus:border-emerald-800 focus:outline-none"
             />
           </div>
@@ -373,20 +454,12 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
               type="text"
               value={examCodeInput}
               onChange={(e) => setExamCodeInput(e.target.value)}
-              placeholder="Contoh: USXII2027"
+              placeholder="Masukkan kode ujian"
               className="w-full rounded-lg border border-slate-300 px-3 py-2.5 font-mono text-sm focus:border-emerald-800 focus:outline-none"
             />
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-            <button
-              type="button"
-              onClick={fillDemoCredentials}
-              className="text-xs font-medium text-emerald-800 hover:underline cursor-pointer"
-            >
-              Isi akun uji coba (CONTOH001)
-            </button>
-
+          <div className="flex justify-end pt-2">
             <button
               type="submit"
               className="rounded-lg bg-emerald-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-emerald-800 transition-colors cursor-pointer"
@@ -418,6 +491,11 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
             ) : (
               draftSavedAt && <span className="text-emerald-700 font-medium">· {draftSavedAt}</span>
             )}
+            {strictFocusEnabled && focusViolations > 0 && (
+              <span className="font-medium text-amber-700 tabular-nums">
+                · Keluar fokus: {focusViolations}x
+              </span>
+            )}
           </div>
         </div>
 
@@ -442,6 +520,35 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
         <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
           Perhatian: Guru baru saja menutup akses ujian secara real-time. Segera hubungi pengawas.
+        </div>
+      )}
+
+      {focusWarning && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-700" />
+            <span>{focusWarning}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFocusWarning(null)}
+            className="text-xs font-medium text-amber-800 hover:underline shrink-0 cursor-pointer"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
+
+      {copyNotice && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-300 bg-slate-100 px-4 py-2.5 text-xs text-slate-800">
+          <span>{copyNotice}</span>
+          <button
+            type="button"
+            onClick={() => setCopyNotice(null)}
+            className="font-medium text-slate-700 hover:underline shrink-0 cursor-pointer"
+          >
+            Mengerti
+          </button>
         </div>
       )}
 
@@ -479,20 +586,36 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
 
                 {useSideLayout ? (
                   <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
-                    <div className="lg:col-span-5">
+                    <div
+                      className={`lg:col-span-5 ${blockCopyPasteEnabled ? 'select-none' : ''}`}
+                      onCopy={handleBlockedQuestionCopy}
+                      onCut={handleBlockedQuestionCopy}
+                      onContextMenu={handleBlockedQuestionCopy}
+                    >
                       <QuestionMediaViewer items={mediaItems} layout={q.media_layout} />
                     </div>
                     <div className="lg:col-span-7 space-y-3">
-                      <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
-                        {q.question_text}
-                      </h3>
-                      {q.indicator && (
-                        <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
-                      )}
+                      <div
+                        className={blockCopyPasteEnabled ? 'select-none space-y-1.5' : 'space-y-1.5'}
+                        onCopy={handleBlockedQuestionCopy}
+                        onCut={handleBlockedQuestionCopy}
+                        onContextMenu={handleBlockedQuestionCopy}
+                      >
+                        <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
+                          {q.question_text}
+                        </h3>
+                        {q.indicator && (
+                          <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
+                        )}
+                      </div>
                       <textarea
                         rows={7}
                         value={text}
                         onChange={(e) => handleAnswerChange(q.question_id, e.target.value)}
+                        onPaste={handleBlockedPaste}
+                        onDrop={(e) => {
+                          if (blockCopyPasteEnabled) e.preventDefault();
+                        }}
                         placeholder="Tuliskan jawaban uraian Anda secara lengkap..."
                         className="w-full rounded-lg border border-slate-300 px-3.5 py-3 text-sm leading-relaxed text-slate-900 focus:border-emerald-800 focus:outline-none"
                       />
@@ -503,22 +626,33 @@ export const StudentExamPortal: React.FC<StudentExamPortalProps> = ({
                   </div>
                 ) : (
                   <>
-                    <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
-                      {q.question_text}
-                    </h3>
+                    <div
+                      className={blockCopyPasteEnabled ? 'select-none space-y-2' : 'space-y-2'}
+                      onCopy={handleBlockedQuestionCopy}
+                      onCut={handleBlockedQuestionCopy}
+                      onContextMenu={handleBlockedQuestionCopy}
+                    >
+                      <h3 className="text-base font-semibold text-slate-900 leading-relaxed">
+                        {q.question_text}
+                      </h3>
 
-                    {q.indicator && (
-                      <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
-                    )}
+                      {q.indicator && (
+                        <p className="text-xs text-slate-500">Indikator: {q.indicator}</p>
+                      )}
 
-                    {hasMedia && (
-                      <QuestionMediaViewer items={mediaItems} layout={q.media_layout} />
-                    )}
+                      {hasMedia && (
+                        <QuestionMediaViewer items={mediaItems} layout={q.media_layout} />
+                      )}
+                    </div>
 
                     <textarea
                       rows={5}
                       value={text}
                       onChange={(e) => handleAnswerChange(q.question_id, e.target.value)}
+                      onPaste={handleBlockedPaste}
+                      onDrop={(e) => {
+                        if (blockCopyPasteEnabled) e.preventDefault();
+                      }}
                       placeholder="Tuliskan jawaban uraian Anda secara lengkap..."
                       className="w-full rounded-lg border border-slate-300 px-3.5 py-3 text-sm leading-relaxed text-slate-900 focus:border-emerald-800 focus:outline-none"
                     />

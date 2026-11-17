@@ -22,13 +22,21 @@ export const OverviewAndAudit: React.FC<OverviewAndAuditProps> = ({
   const canEditConfig = adminRole === 'super_admin';
   const canAccessAcademicTabs = adminRole === 'super_admin' || adminRole === 'teacher';
 
-  const [form, setForm] = useState<ExamConfig>(db.config);
+  const [form, setForm] = useState<ExamConfig>({
+    ...db.config,
+    strict_focus: db.config.strict_focus ?? true,
+    block_copy_paste: db.config.block_copy_paste ?? false
+  });
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState<'Semua' | 'Kritis' | 'Tinggi' | 'Sedang'>('Semua');
 
   useEffect(() => {
-    setForm(db.config);
+    setForm({
+      ...db.config,
+      strict_focus: db.config.strict_focus ?? true,
+      block_copy_paste: db.config.block_copy_paste ?? false
+    });
   }, [db.config]);
 
   const activeQuestions = Object.values(db.questions || {}).filter(
@@ -60,7 +68,9 @@ export const OverviewAndAudit: React.FC<OverviewAndAuditProps> = ({
       await onUpdateConfig({
         ...form,
         duration_minutes: Math.max(5, Number(form.duration_minutes) || 120),
-        max_score: Math.max(1, Number(form.max_score) || 100)
+        max_score: Math.max(1, Number(form.max_score) || 100),
+        strict_focus: form.strict_focus ?? true,
+        block_copy_paste: form.block_copy_paste ?? false
       });
       setSavedNotice('Konfigurasi ujian tersimpan.');
     } finally {
@@ -326,6 +336,44 @@ export const OverviewAndAudit: React.FC<OverviewAndAuditProps> = ({
               onChange={(e) => setForm({ ...form, instructions: e.target.value })}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 disabled:bg-slate-50 disabled:text-slate-600 focus:border-emerald-800 focus:outline-none"
             />
+          </div>
+
+          <div className="md:col-span-3 grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            <label className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800 cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canEditConfig}
+                checked={form.strict_focus ?? true}
+                onChange={(e) => setForm({ ...form, strict_focus: e.target.checked })}
+                className="mt-0.5 accent-emerald-800"
+              />
+              <span>
+                <span className="font-semibold text-slate-900 block">
+                  Mode Fokus Ujian (Anti-Pindah Tab)
+                </span>
+                <span className="text-slate-600">
+                  Mencatat otomatis jika peserta berpindah tab/jendela browser dan menampilkannya ke
+                  guru penilai.
+                </span>
+              </span>
+            </label>
+
+            <label className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800 cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={!canEditConfig}
+                checked={form.block_copy_paste ?? false}
+                onChange={(e) => setForm({ ...form, block_copy_paste: e.target.checked })}
+                className="mt-0.5 accent-emerald-800"
+              />
+              <span>
+                <span className="font-semibold text-slate-900 block">Cegah Salin-Tempel</span>
+                <span className="text-slate-600">
+                  Memblokir salin teks soal dan mencegah peserta menempel (paste) teks dari luar ke
+                  lembar jawab.
+                </span>
+              </span>
+            </label>
           </div>
         </form>
       </section>

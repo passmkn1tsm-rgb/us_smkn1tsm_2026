@@ -11,6 +11,7 @@ import { ExamDatabase } from '../types/exam';
 interface SupabaseSyncHubProps {
   db: ExamDatabase;
   supabaseStatus: 'connected' | 'needs_schema' | 'empty' | 'error';
+  hardenedRpcActive?: boolean;
   syncError: string | null;
   onRefreshFromSupabase: () => Promise<void>;
   onPushSeedToSupabase: () => Promise<void>;
@@ -22,6 +23,7 @@ type CodeTab = 'sql' | 'gas' | 'sdk';
 export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
   db,
   supabaseStatus,
+  hardenedRpcActive = false,
   syncError,
   onRefreshFromSupabase,
   onPushSeedToSupabase,
@@ -97,7 +99,7 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
 
   const codeMap: Record<CodeTab, { title: string; subtitle: string; code: string }> = {
     sql: {
-      title: 'schema.sql (SQL Pembuatan 6 Tabel PostgreSQL, View Nilai & Realtime)',
+      title: 'schema.sql (Skema Terkunci: RLS Ketat, Token Pengelola & RPC Soal Aman)',
       subtitle:
         'Salin dan jalankan di Supabase Dashboard → SQL Editor → New Query. Skrip ini aman dijalankan ulang (idempoten).',
       code: SUPABASE_SCHEMA_SQL
@@ -124,7 +126,9 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
 
   const statusLabel =
     supabaseStatus === 'connected'
-      ? 'Sinkron dengan Supabase'
+      ? hardenedRpcActive
+        ? 'Sinkron · Keamanan RLS & RPC Aktif'
+        : 'Sinkron (Perlu Pembaruan schema.sql)'
       : supabaseStatus === 'empty'
       ? 'Tabel Siap (Belum Ada Data)'
       : supabaseStatus === 'needs_schema'
@@ -139,8 +143,8 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
         </h1>
         <p className="mt-1 text-sm text-slate-600">
           Aplikasi telah dikonfigurasi ke proyek Supabase Anda. Jalankan skrip{' '}
-          <span className="font-mono">schema.sql</span> di SQL Editor Supabase, lalu unggah data
-          awal dengan satu klik.
+          <span className="font-mono">schema.sql</span> di SQL Editor Supabase agar proteksi RLS
+          ketat dan token pengelola aktif sebelum uji coba siswa.
         </p>
       </div>
 
@@ -154,9 +158,11 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
           <div className="text-xs font-medium">
             <span
               className={
-                supabaseStatus === 'connected'
+                supabaseStatus === 'connected' && hardenedRpcActive
                   ? 'text-emerald-700'
-                  : supabaseStatus === 'needs_schema' || supabaseStatus === 'empty'
+                  : supabaseStatus === 'needs_schema' ||
+                    supabaseStatus === 'empty' ||
+                    (supabaseStatus === 'connected' && !hardenedRpcActive)
                   ? 'text-amber-700'
                   : 'text-red-700'
               }
@@ -165,6 +171,19 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
             </span>
           </div>
         </div>
+
+        {(supabaseStatus === 'connected' || supabaseStatus === 'empty') && !hardenedRpcActive && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-950 leading-relaxed">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-700" />
+            <div>
+              <strong>Peringatan Keamanan Ujian:</strong> Database Supabase Anda belum menjalankan
+              versi <span className="font-mono">schema.sql</span> terbaru (RLS Terkunci + RPC
+              Token). Salin kode <span className="font-mono">schema.sql</span> di bawah ini dan
+              jalankan sekali di <strong>Supabase SQL Editor</strong> agar tabel soal, kunci
+              jawaban, akun admin, dan peserta tidak dapat diakses langsung lewat REST API.
+            </div>
+          </div>
+        )}
 
         {(localError || syncError) && (
           <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -181,7 +200,7 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
         )}
 
         <div className="rounded-lg bg-slate-50 p-4 text-xs text-slate-700 space-y-1.5 leading-relaxed">
-          <div className="font-semibold text-slate-900">Langkah Aktivasi Database (Sekali Saja):</div>
+          <div className="font-semibold text-slate-900">Langkah Aktivasi &amp; Keamanan Database:</div>
           <p>
             1. Klik <strong>Salin Kode</strong> pada tab <span className="font-mono">schema.sql</span>{' '}
             di bawah ini.
@@ -191,10 +210,8 @@ export const SupabaseSyncHub: React.FC<SupabaseSyncHubProps> = ({
             lalu klik <strong>Run</strong>.
           </p>
           <p>
-            3. Kembali ke halaman ini dan klik <strong>Unggah Data Saat Ini ke Supabase</strong>{' '}
-            untuk mengisi tabel <span className="font-mono">exam_config</span>,{' '}
-            <span className="font-mono">questions</span>, <span className="font-mono">rubrics</span>,
-            dan <span className="font-mono">students</span>.
+            3. Pastikan akun Super Admin bawaan (<span className="font-mono">ADM001</span>) segera
+            diganti PIN-nya melalui menu <strong>Hak Akses &amp; Akun</strong> setelah login ulang.
           </p>
         </div>
 

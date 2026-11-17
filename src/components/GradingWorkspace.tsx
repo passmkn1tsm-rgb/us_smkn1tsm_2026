@@ -319,9 +319,17 @@ export const GradingWorkspace: React.FC<GradingWorkspaceProps> = ({
           <div className="lg:col-span-8 rounded-lg border border-slate-200 bg-white p-6 space-y-5">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-4">
               <div>
-                <div className="text-xs text-slate-500">
-                  {currentItem.fullName} · {currentItem.className} ·{' '}
-                  <span className="font-mono">{currentItem.studentId}</span>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <span>
+                    {currentItem.fullName} · {currentItem.className} ·{' '}
+                    <span className="font-mono">{currentItem.studentId}</span>
+                  </span>
+                  {(db.responses?.[currentItem.studentId]?.focus_violations || 0) > 0 && (
+                    <span className="font-medium text-amber-700 tabular-nums">
+                      · Catatan Fokus: {db.responses[currentItem.studentId].focus_violations}x
+                      berpindah tab
+                    </span>
+                  )}
                 </div>
                 <h2 className="mt-1 text-lg font-semibold text-slate-900">
                   Soal #{currentItem.questionOrder} ({currentItem.questionId})

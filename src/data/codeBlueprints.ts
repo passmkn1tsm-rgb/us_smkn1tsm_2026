@@ -1,9 +1,10 @@
 export const SUPABASE_SCHEMA_SQL = `-- ============================================================================
--- SKEMA DATABASE POSTGRESQL SUPABASE - APLIKASI UJIAN URAIAN
+-- SKEMA DATABASE POSTGRESQL SUPABASE - APLIKASI UJIAN URAIAN (KEAMANAN KETAT)
 -- Jalankan seluruh skrip ini di Supabase Dashboard -> SQL Editor -> New Query
+-- Skrip ini AMAN dijalankan ulang pada database yang sudah berisi data.
 -- ============================================================================
 
--- 1. Tabel Konfigurasi Ujian (Pengganti sheet Config)
+-- 1. Tabel Konfigurasi Ujian
 CREATE TABLE IF NOT EXISTS public.exam_config (
   exam_code         text PRIMARY KEY,
   school_name       text NOT NULL,
@@ -11,11 +12,16 @@ CREATE TABLE IF NOT EXISTS public.exam_config (
   duration_minutes  integer NOT NULL DEFAULT 120,
   max_score         integer NOT NULL DEFAULT 100,
   exam_open         boolean NOT NULL DEFAULT false,
+  strict_focus      boolean NOT NULL DEFAULT true,
+  block_copy_paste  boolean NOT NULL DEFAULT false,
   instructions      text NOT NULL DEFAULT '',
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
--- 1b. Tabel Hak Akses Admin, Guru & Pengawas (Pengganti TEACHER_EMAILS di Script Properties)
+ALTER TABLE public.exam_config ADD COLUMN IF NOT EXISTS strict_focus boolean NOT NULL DEFAULT true;
+ALTER TABLE public.exam_config ADD COLUMN IF NOT EXISTS block_copy_paste boolean NOT NULL DEFAULT false;
+
+-- 1b. Tabel Hak Akses Admin, Guru & Pengawas
 CREATE TABLE IF NOT EXISTS public.admin_users (
   user_id     text PRIMARY KEY,
   email       text UNIQUE NOT NULL,
@@ -26,7 +32,22 @@ CREATE TABLE IF NOT EXISTS public.admin_users (
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
--- 2. Tabel Bank Soal Uraian (Pengganti sheet Questions + dukungan soal bergambar)
+-- Seed akun Super Admin awal hanya jika belum ada (ganti PIN setelah masuk menu Hak Akses)
+INSERT INTO public.admin_users (user_id, email, full_name, role, access_pin, active)
+VALUES ('ADM001', 'passmkn1tsm@gmail.com', 'Administrator Utama', 'super_admin', 'admin123', true)
+ON CONFLICT (user_id) DO NOTHING;
+
+-- 1c. Tabel Sesi Token Pengelola (Berlaku 12 Jam di Sisi Server)
+CREATE TABLE IF NOT EXISTS public.admin_sessions (
+  token       text PRIMARY KEY,
+  user_id     text NOT NULL REFERENCES public.admin_users(user_id) ON DELETE CASCADE,
+  email       text NOT NULL,
+  role        text NOT NULL,
+  expires_at  timestamptz NOT NULL DEFAULT (now() + interval '12 hours'),
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- 2. Tabel Bank Soal Uraian + Soal Bergambar
 CREATE TABLE IF NOT EXISTS public.questions (
   question_id           text PRIMARY KEY,
   exam_code             text NOT NULL REFERENCES public.exam_config(exam_code) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -46,12 +67,11 @@ CREATE TABLE IF NOT EXISTS public.questions (
   created_at            timestamptz NOT NULL DEFAULT now()
 );
 
--- Migrasi aman bila tabel questions sudah ada sebelumnya
 ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS media_layout text NOT NULL DEFAULT 'top';
 ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS media_items jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS answer_key_image_url text NOT NULL DEFAULT '';
 
--- 3. Tabel Rubrik Penilaian (Pengganti sheet Rubrics)
+-- 3. Tabel Rubrik Penilaian
 CREATE TABLE IF NOT EXISTS public.rubrics (
   rubric_id    text PRIMARY KEY,
   question_id  text NOT NULL REFERENCES public.questions(question_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -61,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.rubrics (
   order_no     integer NOT NULL DEFAULT 1
 );
 
--- 4. Tabel Peserta Ujian (Pengganti sheet Students)
+-- 4. Tabel Peserta Ujian
 CREATE TABLE IF NOT EXISTS public.students (
   student_id   text PRIMARY KEY,
   full_name    text NOT NULL,
@@ -72,23 +92,26 @@ CREATE TABLE IF NOT EXISTS public.students (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 
--- 5. Tabel Jawaban Peserta (Pengganti sheet Responses, mendukung draf & submit final)
+-- 5. Tabel Jawaban Peserta (termasuk pencatatan perpindahan tab)
 CREATE TABLE IF NOT EXISTS public.responses (
-  response_id   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  student_id    text NOT NULL REFERENCES public.students(student_id) ON DELETE CASCADE ON UPDATE CASCADE,
-  full_name     text NOT NULL,
-  class_name    text NOT NULL DEFAULT '',
-  exam_code     text NOT NULL REFERENCES public.exam_config(exam_code) ON DELETE CASCADE ON UPDATE CASCADE,
-  question_id   text NOT NULL REFERENCES public.questions(question_id) ON DELETE CASCADE ON UPDATE CASCADE,
-  answer_text   text NOT NULL DEFAULT '',
-  status        text NOT NULL DEFAULT 'IN_PROGRESS' CHECK (status IN ('IN_PROGRESS', 'SUBMITTED')),
-  started_at    timestamptz NOT NULL DEFAULT now(),
-  submitted_at  timestamptz,
-  updated_at    timestamptz NOT NULL DEFAULT now(),
+  response_id       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  student_id        text NOT NULL REFERENCES public.students(student_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  full_name         text NOT NULL,
+  class_name        text NOT NULL DEFAULT '',
+  exam_code         text NOT NULL REFERENCES public.exam_config(exam_code) ON DELETE CASCADE ON UPDATE CASCADE,
+  question_id       text NOT NULL REFERENCES public.questions(question_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  answer_text       text NOT NULL DEFAULT '',
+  status            text NOT NULL DEFAULT 'IN_PROGRESS' CHECK (status IN ('IN_PROGRESS', 'SUBMITTED')),
+  focus_violations  integer NOT NULL DEFAULT 0,
+  started_at        timestamptz NOT NULL DEFAULT now(),
+  submitted_at      timestamptz,
+  updated_at        timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_response_student_exam_question UNIQUE (student_id, exam_code, question_id)
 );
 
--- 6. Tabel Nilai Rubrik Guru (Pengganti sheet Grades, idempoten per siswa-soal)
+ALTER TABLE public.responses ADD COLUMN IF NOT EXISTS focus_violations integer NOT NULL DEFAULT 0;
+
+-- 6. Tabel Nilai Rubrik Guru
 CREATE TABLE IF NOT EXISTS public.grades (
   grade_id         text PRIMARY KEY,
   student_id       text NOT NULL REFERENCES public.students(student_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -107,72 +130,615 @@ CREATE TABLE IF NOT EXISTS public.grades (
 
 -- Indeks Performa Query
 CREATE INDEX IF NOT EXISTS idx_admin_users_email ON public.admin_users (lower(email), active);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_exp ON public.admin_sessions (expires_at);
 CREATE INDEX IF NOT EXISTS idx_questions_exam_active ON public.questions (exam_code, active, order_no);
 CREATE INDEX IF NOT EXISTS idx_rubrics_question ON public.rubrics (question_id, order_no);
 CREATE INDEX IF NOT EXISTS idx_students_exam_class ON public.students (exam_code, class_name, active);
 CREATE INDEX IF NOT EXISTS idx_responses_exam_status ON public.responses (exam_code, status, student_id);
 CREATE INDEX IF NOT EXISTS idx_grades_exam_student ON public.grades (exam_code, student_id);
 
--- Fungsi RPC Verifikasi Login Admin/Guru di Sisi Server PostgreSQL
+-- ============================================================================
+-- FUNGSI KEAMANAN SISI SERVER (SECURITY DEFINER RPCs)
+-- ============================================================================
+
+-- Helper otorisasi peran pengelola di server
+CREATE OR REPLACE FUNCTION public.require_admin_role_(p_token text, p_allowed_roles text[])
+RETURNS public.admin_sessions
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_sess public.admin_sessions;
+BEGIN
+  IF p_token IS NULL OR trim(p_token) = '' THEN
+    RAISE EXCEPTION 'Sesi pengelola tidak valid atau sudah berakhir. Silakan login ulang.';
+  END IF;
+
+  SELECT s.* INTO v_sess
+  FROM public.admin_sessions s
+  JOIN public.admin_users u ON u.user_id = s.user_id
+  WHERE s.token = trim(p_token)
+    AND s.expires_at > now()
+    AND u.active = true
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Sesi pengelola kadaluwarsa atau akun nonaktif. Silakan login ulang.';
+  END IF;
+
+  IF NOT (v_sess.role = ANY(p_allowed_roles)) THEN
+    RAISE EXCEPTION 'Akses ditolak: peran % tidak memiliki izin untuk aksi ini.', v_sess.role;
+  END IF;
+
+  RETURN v_sess;
+END;
+$$;
+
+-- Login Pengelola (mengembalikan session_token, TANPA access_pin)
+DROP FUNCTION IF EXISTS public.verify_admin_login(text, text);
 CREATE OR REPLACE FUNCTION public.verify_admin_login(p_email text, p_pin text)
 RETURNS TABLE (
   user_id text,
   email text,
   full_name text,
-  role text
+  role text,
+  session_token text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
-  SELECT a.user_id, a.email, a.full_name, a.role
+DECLARE
+  v_user public.admin_users;
+  v_token text;
+BEGIN
+  DELETE FROM public.admin_sessions WHERE expires_at < now();
+
+  SELECT a.* INTO v_user
   FROM public.admin_users a
   WHERE lower(trim(a.email)) = lower(trim(p_email))
     AND a.access_pin = trim(p_pin)
     AND a.active = true
   LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  v_token := gen_random_uuid()::text;
+  INSERT INTO public.admin_sessions (token, user_id, email, role, expires_at)
+  VALUES (v_token, v_user.user_id, v_user.email, v_user.role, now() + interval '12 hours');
+
+  RETURN QUERY SELECT v_user.user_id, v_user.email, v_user.full_name, v_user.role, v_token;
+END;
 $$;
 
--- Fungsi RPC Khusus Siswa: Hanya mengambil soal aktif TANPA mengirim answer_key (kunci jawaban)
-CREATE OR REPLACE FUNCTION public.get_student_exam_questions(p_exam_code text)
-RETURNS TABLE (
-  question_id text,
-  exam_code text,
-  subject text,
-  class_name text,
-  competency text,
-  indicator text,
-  topic text,
-  question_text text,
-  max_score numeric,
-  order_no integer,
-  active boolean,
-  media_layout text,
-  media_items jsonb
+-- Login Siswa Tervalidasi di Server
+CREATE OR REPLACE FUNCTION public.verify_student_login(
+  p_student_id text,
+  p_access_code text,
+  p_exam_code text
 )
-LANGUAGE sql
+RETURNS jsonb
+LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
-  SELECT
-    q.question_id,
-    q.exam_code,
-    q.subject,
-    q.class_name,
-    q.competency,
-    q.indicator,
-    q.topic,
-    q.question_text,
-    q.max_score,
-    q.order_no,
-    q.active,
-    q.media_layout,
-    q.media_items
-  FROM public.questions q
-  WHERE q.exam_code = trim(p_exam_code)
-    AND q.active = true
-  ORDER BY q.order_no ASC;
+DECLARE
+  v_cfg public.exam_config;
+  v_st public.students;
+  v_submitted boolean := false;
+BEGIN
+  SELECT * INTO v_cfg
+  FROM public.exam_config
+  WHERE exam_code = trim(p_exam_code)
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO v_st
+  FROM public.students
+  WHERE student_id = trim(p_student_id)
+    AND exam_code = trim(p_exam_code)
+    AND access_code = trim(p_access_code)
+    AND active = true
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1 FROM public.responses
+    WHERE student_id = v_st.student_id
+      AND exam_code = v_st.exam_code
+      AND status = 'SUBMITTED'
+  ) INTO v_submitted;
+
+  RETURN jsonb_build_object(
+    'config', to_jsonb(v_cfg),
+    'student', to_jsonb(v_st),
+    'already_submitted', v_submitted
+  );
+END;
 $$;
 
--- View Rekap Nilai Otomatis (Langsung bisa dilihat di Table Editor Supabase)
+-- Pengambilan Soal Khusus Siswa (Wajib terverifikasi & TANPA kunci jawaban)
+CREATE OR REPLACE FUNCTION public.get_student_exam_scope(
+  p_student_id text,
+  p_access_code text,
+  p_exam_code text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_cfg public.exam_config;
+  v_st public.students;
+  v_questions jsonb;
+  v_responses jsonb;
+BEGIN
+  SELECT * INTO v_cfg
+  FROM public.exam_config
+  WHERE exam_code = trim(p_exam_code)
+  LIMIT 1;
+
+  IF NOT FOUND OR NOT v_cfg.exam_open THEN
+    RAISE EXCEPTION 'Ujian belum dibuka oleh pengawas.';
+  END IF;
+
+  SELECT * INTO v_st
+  FROM public.students
+  WHERE student_id = trim(p_student_id)
+    AND exam_code = trim(p_exam_code)
+    AND access_code = trim(p_access_code)
+    AND active = true
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Akses peserta tidak valid.';
+  END IF;
+
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'question_id', q.question_id,
+    'exam_code', q.exam_code,
+    'subject', q.subject,
+    'class_name', q.class_name,
+    'competency', q.competency,
+    'indicator', q.indicator,
+    'topic', q.topic,
+    'question_text', q.question_text,
+    'max_score', q.max_score,
+    'order_no', q.order_no,
+    'active', q.active,
+    'media_layout', q.media_layout,
+    'media_items', q.media_items
+  ) ORDER BY q.order_no ASC), '[]'::jsonb)
+  INTO v_questions
+  FROM public.questions q
+  WHERE q.exam_code = v_st.exam_code AND q.active = true;
+
+  SELECT COALESCE(jsonb_agg(to_jsonb(r)), '[]'::jsonb)
+  INTO v_responses
+  FROM public.responses r
+  WHERE r.student_id = v_st.student_id AND r.exam_code = v_st.exam_code;
+
+  RETURN jsonb_build_object(
+    'config', to_jsonb(v_cfg),
+    'questions', v_questions,
+    'responses', v_responses
+  );
+END;
+$$;
+
+-- Simpan Draf / Kirim Final Jawaban Siswa (Tervalidasi & anti-ubah setelah SUBMITTED)
+CREATE OR REPLACE FUNCTION public.student_upsert_answers(
+  p_student_id text,
+  p_access_code text,
+  p_exam_code text,
+  p_answers jsonb,
+  p_status text,
+  p_focus_violations integer DEFAULT 0
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_st public.students;
+  v_already_submitted boolean;
+  v_now timestamptz := now();
+  v_qid text;
+  v_ans text;
+BEGIN
+  SELECT * INTO v_st
+  FROM public.students
+  WHERE student_id = trim(p_student_id)
+    AND exam_code = trim(p_exam_code)
+    AND access_code = trim(p_access_code)
+    AND active = true
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Kredensial peserta tidak valid.';
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1 FROM public.responses
+    WHERE student_id = v_st.student_id
+      AND exam_code = v_st.exam_code
+      AND status = 'SUBMITTED'
+  ) INTO v_already_submitted;
+
+  IF v_already_submitted THEN
+    RAISE EXCEPTION 'Jawaban sudah terkirim dan terkunci.';
+  END IF;
+
+  FOR v_qid, v_ans IN SELECT key, value FROM jsonb_each_text(COALESCE(p_answers, '{}'::jsonb))
+  LOOP
+    INSERT INTO public.responses (
+      student_id, full_name, class_name, exam_code, question_id,
+      answer_text, status, focus_violations, started_at, submitted_at, updated_at
+    )
+    VALUES (
+      v_st.student_id,
+      v_st.full_name,
+      v_st.class_name,
+      v_st.exam_code,
+      v_qid,
+      COALESCE(v_ans, ''),
+      CASE WHEN p_status = 'SUBMITTED' THEN 'SUBMITTED' ELSE 'IN_PROGRESS' END,
+      GREATEST(0, COALESCE(p_focus_violations, 0)),
+      v_now,
+      CASE WHEN p_status = 'SUBMITTED' THEN v_now ELSE NULL END,
+      v_now
+    )
+    ON CONFLICT (student_id, exam_code, question_id) DO UPDATE SET
+      answer_text = EXCLUDED.answer_text,
+      status = CASE
+        WHEN public.responses.status = 'SUBMITTED' THEN 'SUBMITTED'
+        ELSE EXCLUDED.status
+      END,
+      focus_violations = GREATEST(public.responses.focus_violations, EXCLUDED.focus_violations),
+      submitted_at = COALESCE(public.responses.submitted_at, EXCLUDED.submitted_at),
+      updated_at = v_now;
+  END LOOP;
+END;
+$$;
+
+-- RPC Pengelola: Ambil database konsol sesuai peran token
+CREATE OR REPLACE FUNCTION public.admin_fetch_exam_database(p_token text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_sess public.admin_sessions;
+  v_cfg jsonb;
+  v_admins jsonb := '[]'::jsonb;
+  v_questions jsonb := '[]'::jsonb;
+  v_rubrics jsonb := '[]'::jsonb;
+  v_students jsonb := '[]'::jsonb;
+  v_responses jsonb := '[]'::jsonb;
+  v_grades jsonb := '[]'::jsonb;
+BEGIN
+  v_sess := public.require_admin_role_(p_token, ARRAY['super_admin', 'teacher', 'proctor']);
+
+  SELECT to_jsonb(c) INTO v_cfg FROM public.exam_config c LIMIT 1;
+
+  IF v_sess.role = 'super_admin' THEN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'user_id', u.user_id,
+      'email', u.email,
+      'full_name', u.full_name,
+      'role', u.role,
+      'active', u.active,
+      'created_at', u.created_at
+    )), '[]'::jsonb)
+    INTO v_admins FROM public.admin_users u;
+  END IF;
+
+  IF v_sess.role IN ('super_admin', 'teacher') THEN
+    SELECT COALESCE(jsonb_agg(to_jsonb(q) ORDER BY q.order_no ASC), '[]'::jsonb)
+    INTO v_questions FROM public.questions q;
+
+    SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.order_no ASC), '[]'::jsonb)
+    INTO v_rubrics FROM public.rubrics r;
+
+    SELECT COALESCE(jsonb_agg(to_jsonb(g)), '[]'::jsonb)
+    INTO v_grades FROM public.grades g;
+  END IF;
+
+  SELECT COALESCE(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+  INTO v_students FROM public.students s;
+
+  IF v_sess.role = 'proctor' THEN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'student_id', r.student_id,
+      'full_name', r.full_name,
+      'class_name', r.class_name,
+      'exam_code', r.exam_code,
+      'question_id', r.question_id,
+      'answer_text', '',
+      'status', r.status,
+      'focus_violations', r.focus_violations,
+      'started_at', r.started_at,
+      'submitted_at', r.submitted_at,
+      'updated_at', r.updated_at
+    )), '[]'::jsonb)
+    INTO v_responses FROM public.responses r;
+  ELSE
+    SELECT COALESCE(jsonb_agg(to_jsonb(r)), '[]'::jsonb)
+    INTO v_responses FROM public.responses r;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'config', v_cfg,
+    'admin_users', v_admins,
+    'questions', v_questions,
+    'rubrics', v_rubrics,
+    'students', v_students,
+    'responses', v_responses,
+    'grades', v_grades
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_upsert_config(p_token text, p_config jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_sess public.admin_sessions;
+BEGIN
+  v_sess := public.require_admin_role_(p_token, ARRAY['super_admin', 'proctor']);
+
+  IF v_sess.role = 'proctor' THEN
+    UPDATE public.exam_config
+    SET exam_open = COALESCE((p_config ->> 'exam_open')::boolean, exam_open),
+        updated_at = now()
+    WHERE exam_code = p_config ->> 'exam_code';
+    RETURN;
+  END IF;
+
+  INSERT INTO public.exam_config (
+    exam_code, school_name, exam_title, duration_minutes, max_score,
+    exam_open, strict_focus, block_copy_paste, instructions, updated_at
+  )
+  VALUES (
+    p_config ->> 'exam_code',
+    p_config ->> 'school_name',
+    p_config ->> 'exam_title',
+    COALESCE((p_config ->> 'duration_minutes')::integer, 120),
+    COALESCE((p_config ->> 'max_score')::integer, 100),
+    COALESCE((p_config ->> 'exam_open')::boolean, false),
+    COALESCE((p_config ->> 'strict_focus')::boolean, true),
+    COALESCE((p_config ->> 'block_copy_paste')::boolean, false),
+    COALESCE(p_config ->> 'instructions', ''),
+    now()
+  )
+  ON CONFLICT (exam_code) DO UPDATE SET
+    school_name = EXCLUDED.school_name,
+    exam_title = EXCLUDED.exam_title,
+    duration_minutes = EXCLUDED.duration_minutes,
+    max_score = EXCLUDED.max_score,
+    exam_open = EXCLUDED.exam_open,
+    strict_focus = EXCLUDED.strict_focus,
+    block_copy_paste = EXCLUDED.block_copy_paste,
+    instructions = EXCLUDED.instructions,
+    updated_at = now();
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_upsert_question(
+  p_token text,
+  p_question jsonb,
+  p_rubrics jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_qid text := p_question ->> 'question_id';
+  v_rb jsonb;
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin', 'teacher']);
+
+  INSERT INTO public.questions (
+    question_id, exam_code, subject, class_name, competency, indicator, topic,
+    question_text, answer_key, max_score, order_no, active,
+    media_layout, media_items, answer_key_image_url
+  )
+  VALUES (
+    v_qid,
+    p_question ->> 'exam_code',
+    COALESCE(p_question ->> 'subject', ''),
+    COALESCE(p_question ->> 'class_name', ''),
+    COALESCE(p_question ->> 'competency', ''),
+    COALESCE(p_question ->> 'indicator', ''),
+    COALESCE(p_question ->> 'topic', ''),
+    COALESCE(p_question ->> 'question_text', ''),
+    COALESCE(p_question ->> 'answer_key', ''),
+    COALESCE((p_question ->> 'max_score')::numeric, 10),
+    COALESCE((p_question ->> 'order_no')::integer, 1),
+    COALESCE((p_question ->> 'active')::boolean, true),
+    COALESCE(p_question ->> 'media_layout', 'top'),
+    COALESCE(p_question -> 'media_items', '[]'::jsonb),
+    COALESCE(p_question ->> 'answer_key_image_url', '')
+  )
+  ON CONFLICT (question_id) DO UPDATE SET
+    exam_code = EXCLUDED.exam_code,
+    subject = EXCLUDED.subject,
+    class_name = EXCLUDED.class_name,
+    competency = EXCLUDED.competency,
+    indicator = EXCLUDED.indicator,
+    topic = EXCLUDED.topic,
+    question_text = EXCLUDED.question_text,
+    answer_key = EXCLUDED.answer_key,
+    max_score = EXCLUDED.max_score,
+    order_no = EXCLUDED.order_no,
+    active = EXCLUDED.active,
+    media_layout = EXCLUDED.media_layout,
+    media_items = EXCLUDED.media_items,
+    answer_key_image_url = EXCLUDED.answer_key_image_url;
+
+  DELETE FROM public.rubrics WHERE question_id = v_qid;
+
+  FOR v_rb IN SELECT * FROM jsonb_array_elements(COALESCE(p_rubrics, '[]'::jsonb))
+  LOOP
+    INSERT INTO public.rubrics (rubric_id, question_id, criterion, description, max_points, order_no)
+    VALUES (
+      v_rb ->> 'rubric_id',
+      v_qid,
+      COALESCE(v_rb ->> 'criterion', ''),
+      COALESCE(v_rb ->> 'description', ''),
+      COALESCE((v_rb ->> 'max_points')::numeric, 5),
+      COALESCE((v_rb ->> 'order_no')::integer, 1)
+    );
+  END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_delete_question(p_token text, p_question_id text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin', 'teacher']);
+  DELETE FROM public.questions WHERE question_id = p_question_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_upsert_students(p_token text, p_students jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_st jsonb;
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin', 'teacher', 'proctor']);
+  FOR v_st IN SELECT * FROM jsonb_array_elements(COALESCE(p_students, '[]'::jsonb))
+  LOOP
+    INSERT INTO public.students (student_id, full_name, class_name, exam_code, access_code, active)
+    VALUES (
+      v_st ->> 'student_id',
+      v_st ->> 'full_name',
+      COALESCE(v_st ->> 'class_name', ''),
+      v_st ->> 'exam_code',
+      v_st ->> 'access_code',
+      COALESCE((v_st ->> 'active')::boolean, true)
+    )
+    ON CONFLICT (student_id) DO UPDATE SET
+      full_name = EXCLUDED.full_name,
+      class_name = EXCLUDED.class_name,
+      exam_code = EXCLUDED.exam_code,
+      access_code = EXCLUDED.access_code,
+      active = EXCLUDED.active;
+  END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_reset_submission(p_token text, p_student_id text, p_exam_code text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin', 'teacher', 'proctor']);
+  UPDATE public.responses
+  SET status = 'IN_PROGRESS', submitted_at = NULL, updated_at = now()
+  WHERE student_id = p_student_id AND exam_code = p_exam_code;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_upsert_grades(p_token text, p_grades jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_g jsonb;
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin', 'teacher']);
+  FOR v_g IN SELECT * FROM jsonb_array_elements(COALESCE(p_grades, '[]'::jsonb))
+  LOOP
+    INSERT INTO public.grades (
+      grade_id, student_id, full_name, class_name, exam_code, question_id,
+      criteria_scores, rubric_total, max_score, feedback, grader_email, graded_at
+    )
+    VALUES (
+      v_g ->> 'grade_id',
+      v_g ->> 'student_id',
+      COALESCE(v_g ->> 'full_name', ''),
+      COALESCE(v_g ->> 'class_name', ''),
+      v_g ->> 'exam_code',
+      v_g ->> 'question_id',
+      COALESCE(v_g -> 'criteria_scores', '{}'::jsonb),
+      COALESCE((v_g ->> 'rubric_total')::numeric, 0),
+      COALESCE((v_g ->> 'max_score')::numeric, 0),
+      COALESCE(v_g ->> 'feedback', ''),
+      COALESCE(v_g ->> 'grader_email', ''),
+      COALESCE((v_g ->> 'graded_at')::timestamptz, now())
+    )
+    ON CONFLICT (student_id, exam_code, question_id) DO UPDATE SET
+      criteria_scores = EXCLUDED.criteria_scores,
+      rubric_total = EXCLUDED.rubric_total,
+      max_score = EXCLUDED.max_score,
+      feedback = EXCLUDED.feedback,
+      grader_email = EXCLUDED.grader_email,
+      graded_at = EXCLUDED.graded_at;
+  END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_upsert_user(p_token text, p_user jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_pin text := trim(COALESCE(p_user ->> 'access_pin', ''));
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin']);
+
+  INSERT INTO public.admin_users (user_id, email, full_name, role, access_pin, active)
+  VALUES (
+    p_user ->> 'user_id',
+    lower(trim(p_user ->> 'email')),
+    trim(p_user ->> 'full_name'),
+    COALESCE(p_user ->> 'role', 'teacher'),
+    CASE WHEN v_pin = '' THEN 'ubah_pin_segera' ELSE v_pin END,
+    COALESCE((p_user ->> 'active')::boolean, true)
+  )
+  ON CONFLICT (user_id) DO UPDATE SET
+    email = EXCLUDED.email,
+    full_name = EXCLUDED.full_name,
+    role = EXCLUDED.role,
+    access_pin = CASE
+      WHEN v_pin <> '' THEN v_pin
+      ELSE public.admin_users.access_pin
+    END,
+    active = EXCLUDED.active;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_delete_user(p_token text, p_user_id text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  PERFORM public.require_admin_role_(p_token, ARRAY['super_admin']);
+  DELETE FROM public.admin_users WHERE user_id = p_user_id;
+END;
+$$;
+
+-- View Rekap Nilai Otomatis
 CREATE OR REPLACE VIEW public.v_student_scores AS
 SELECT
   s.student_id,
@@ -217,12 +783,12 @@ DROP POLICY IF EXISTS "allow_delete_exam_images" ON storage.objects;
 CREATE POLICY "allow_delete_exam_images" ON storage.objects
   FOR DELETE USING (bucket_id = 'exam-images');
 
--- Aktifkan Supabase Realtime pada seluruh tabel ujian
+-- Aktifkan Supabase Realtime (khususnya exam_config untuk siswa & monitoring konsol)
 DO $$
 DECLARE
   tbl text;
 BEGIN
-  FOREACH tbl IN ARRAY ARRAY['exam_config', 'admin_users', 'questions', 'rubrics', 'students', 'responses', 'grades']
+  FOREACH tbl IN ARRAY ARRAY['exam_config', 'questions', 'rubrics', 'students', 'responses', 'grades']
   LOOP
     IF NOT EXISTS (
       SELECT 1
@@ -237,36 +803,51 @@ BEGIN
 END $$;
 
 -- ============================================================================
--- ROW LEVEL SECURITY (RLS)
+-- ROW LEVEL SECURITY (RLS TERKUNCI KETAT!)
+-- Akses baca/tulis langsung ke tabel mentah diblokir untuk klien anonim.
+-- Seluruh operasi wajib lewat fungsi RPC tervalidasi di atas (SECURITY DEFINER).
 -- ============================================================================
 ALTER TABLE public.exam_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.admin_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.admin_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.rubrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.students ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.responses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.grades ENABLE ROW LEVEL SECURITY;
 
+-- exam_config: siswa hanya boleh membaca status buka/tutup & durasi ujian
 DROP POLICY IF EXISTS "allow_all_exam_config" ON public.exam_config;
-CREATE POLICY "allow_all_exam_config" ON public.exam_config FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "public_read_exam_config" ON public.exam_config;
+CREATE POLICY "public_read_exam_config" ON public.exam_config FOR SELECT USING (true);
 
+-- Tutup akses langsung dari REST API anon pada tabel sensitif
 DROP POLICY IF EXISTS "allow_all_admin_users" ON public.admin_users;
-CREATE POLICY "allow_all_admin_users" ON public.admin_users FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "deny_direct_admin_users" ON public.admin_users;
+CREATE POLICY "deny_direct_admin_users" ON public.admin_users FOR ALL USING (false) WITH CHECK (false);
+
+DROP POLICY IF EXISTS "deny_direct_admin_sessions" ON public.admin_sessions;
+CREATE POLICY "deny_direct_admin_sessions" ON public.admin_sessions FOR ALL USING (false) WITH CHECK (false);
 
 DROP POLICY IF EXISTS "allow_all_questions" ON public.questions;
-CREATE POLICY "allow_all_questions" ON public.questions FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "deny_direct_questions" ON public.questions;
+CREATE POLICY "deny_direct_questions" ON public.questions FOR ALL USING (false) WITH CHECK (false);
 
 DROP POLICY IF EXISTS "allow_all_rubrics" ON public.rubrics;
-CREATE POLICY "allow_all_rubrics" ON public.rubrics FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "deny_direct_rubrics" ON public.rubrics;
+CREATE POLICY "deny_direct_rubrics" ON public.rubrics FOR ALL USING (false) WITH CHECK (false);
 
 DROP POLICY IF EXISTS "allow_all_students" ON public.students;
-CREATE POLICY "allow_all_students" ON public.students FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "deny_direct_students" ON public.students;
+CREATE POLICY "deny_direct_students" ON public.students FOR ALL USING (false) WITH CHECK (false);
 
 DROP POLICY IF EXISTS "allow_all_responses" ON public.responses;
-CREATE POLICY "allow_all_responses" ON public.responses FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "deny_direct_responses" ON public.responses;
+CREATE POLICY "deny_direct_responses" ON public.responses FOR ALL USING (false) WITH CHECK (false);
 
 DROP POLICY IF EXISTS "allow_all_grades" ON public.grades;
-CREATE POLICY "allow_all_grades" ON public.grades FOR ALL USING (true) WITH CHECK (true);`;
+DROP POLICY IF EXISTS "deny_direct_grades" ON public.grades;
+CREATE POLICY "deny_direct_grades" ON public.grades FOR ALL USING (false) WITH CHECK (false);`;
 
 export const GAS_SUPABASE_BRIDGE_GS = `/**
  * BRIDGE GOOGLE APPS SCRIPT -> SUPABASE REST API (PostgREST)

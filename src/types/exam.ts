@@ -18,6 +18,8 @@ export interface ExamConfig {
   max_score: number;
   exam_open: boolean;
   instructions: string;
+  strict_focus?: boolean;
+  block_copy_paste?: boolean;
 }
 
 export interface RubricCriterion {
@@ -84,6 +86,7 @@ export interface StudentSubmission {
   started_at?: string;
   submitted_at?: string;
   draft_updated_at?: string;
+  focus_violations?: number;
   answers: Record<string, string>;
 }
 
@@ -113,7 +116,7 @@ export interface ExamDatabase {
 
 export type AuthSession =
   | { kind: 'student'; student: StudentRecord }
-  | { kind: 'admin'; admin: Omit<AdminUser, 'access_pin'> }
+  | { kind: 'admin'; admin: Omit<AdminUser, 'access_pin'> & { session_token?: string } }
   | null;
 
 export interface StudentResultRow {

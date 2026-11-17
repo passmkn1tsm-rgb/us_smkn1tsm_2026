@@ -26,10 +26,12 @@ import {
 import {
   bulkUpsertGradesSupabase,
   bulkUpsertQuestionsWithRubricsSupabase,
+  checkHardenedSecurityActive,
   deleteAdminUserSupabase,
   deleteQuestionSupabase,
   fetchExamDatabaseFromSupabase,
   fetchStudentExamScopeFromSupabase,
+  isSessionExpiredError,
   pushFullDatabaseToSupabase,
   resetSubmissionSupabase,
   subscribeExamSupabase,
@@ -118,8 +120,11 @@ export default function App() {
   const [supabaseStatus, setSupabaseStatus] = useState<
     'connected' | 'needs_schema' | 'empty' | 'error'
   >('needs_schema');
+  const [hardenedRpcActive, setHardenedRpcActive] = useState<boolean>(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const adminRefreshTimerRef = useRef<number | null>(null);
+
+  const adminToken = session?.kind === 'admin' ? session.admin.session_token : undefined;
 
   useEffect(() => {
     // Jangan menimpa cache mirror penuh bila sedang login sebagai siswa (isolasi data)
@@ -143,24 +148,36 @@ export default function App() {
     }
   }, [session]);
 
-  const refreshFromSupabase = useCallback(async () => {
-    try {
-      const res = await fetchExamDatabaseFromSupabase();
-      if (res.isEmpty) {
-        setSupabaseStatus('empty');
-        setSyncError(null);
-      } else if (res.data) {
-        setDb(res.data);
-        setSupabaseStatus('connected');
-        setSyncError(null);
+  const refreshFromSupabase = useCallback(
+    async (tokenOverride?: string) => {
+      const tokenToUse = tokenOverride ?? adminToken;
+      try {
+        const res = await fetchExamDatabaseFromSupabase(tokenToUse);
+        setHardenedRpcActive(res.hardenedRpcActive);
+        if (res.isEmpty) {
+          setSupabaseStatus('empty');
+          setSyncError(null);
+        } else if (res.data) {
+          setDb(res.data);
+          setSupabaseStatus('connected');
+          setSyncError(null);
+        }
+      } catch (err) {
+        if (isSessionExpiredError(err)) {
+          setPreviewStudentMode(false);
+          setMobileMenuOpen(false);
+          setActiveTab('overview');
+          setSession(null);
+          return;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        setSupabaseStatus(msg.includes('Tabel database belum dibuat') ? 'needs_schema' : 'error');
+        setSyncError(msg);
+        throw err;
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setSupabaseStatus(msg.includes('Tabel database belum dibuat') ? 'needs_schema' : 'error');
-      setSyncError(msg);
-      throw err;
-    }
-  }, []);
+    },
+    [adminToken]
+  );
 
   // Scoped Data & Realtime Subscription berdasarkan peran sesi aktif
   useEffect(() => {
@@ -182,6 +199,9 @@ export default function App() {
             );
             return;
           }
+          checkHardenedSecurityActive().then((hardened) => {
+            if (active) setHardenedRpcActive(hardened);
+          });
           if (!data || data.length === 0) {
             setSupabaseStatus('empty');
             return;
@@ -197,6 +217,10 @@ export default function App() {
               duration_minutes: Number(cfgRow.duration_minutes || 120),
               max_score: Number(cfgRow.max_score || 100),
               exam_open: Boolean(cfgRow.exam_open),
+              strict_focus:
+                cfgRow.strict_focus !== undefined ? Boolean(cfgRow.strict_focus) : true,
+              block_copy_paste:
+                cfgRow.block_copy_paste !== undefined ? Boolean(cfgRow.block_copy_paste) : false,
               instructions: String(cfgRow.instructions || '')
             }
           }));
@@ -206,11 +230,11 @@ export default function App() {
       };
     }
 
-    // 2. Sesi Siswa: Hanya tarik soal aktif (tanpa kunci jawaban) + jawaban dirinya sendiri,
-    // serta hanya langganan Realtime pada tabel exam_config (hemat kuota & tahan ratusan peserta).
+    // 2. Sesi Siswa: Hanya tarik soal aktif (tanpa kunci jawaban) + jawaban dirinya sendiri via RPC tervalidasi,
+    // serta hanya langganan Realtime pada tabel exam_config.
     if (session.kind === 'student') {
       const st = session.student;
-      fetchStudentExamScopeFromSupabase(st.student_id, st.exam_code)
+      fetchStudentExamScopeFromSupabase(st)
         .then((scope) => {
           setSupabaseStatus('connected');
           setDb((prev) => ({
@@ -242,7 +266,8 @@ export default function App() {
     }
 
     // 3. Sesi Admin/Guru/Pengawas: Muat konsol lengkap dengan throttle 4 detik pada event Realtime
-    refreshFromSupabase().catch(() => {
+    const activeToken = session.admin.session_token;
+    refreshFromSupabase(activeToken).catch(() => {
       // Ignore initial schema error cleanly
     });
 
@@ -250,16 +275,19 @@ export default function App() {
       if (adminRefreshTimerRef.current) return;
       adminRefreshTimerRef.current = window.setTimeout(() => {
         adminRefreshTimerRef.current = null;
-        fetchExamDatabaseFromSupabase()
+        fetchExamDatabaseFromSupabase(activeToken)
           .then((res) => {
+            setHardenedRpcActive(res.hardenedRpcActive);
             if (res.data) {
               setDb(res.data);
               setSupabaseStatus('connected');
               setSyncError(null);
             }
           })
-          .catch(() => {
-            // Ignore realtime refresh errors
+          .catch((err) => {
+            if (isSessionExpiredError(err)) {
+              setSession(null);
+            }
           });
       }, 4000);
     });
@@ -271,7 +299,12 @@ export default function App() {
       }
       supabase.removeChannel(adminChannel);
     };
-  }, [session?.kind, session?.kind === 'student' ? session.student.student_id : '', refreshFromSupabase]);
+  }, [
+    session?.kind,
+    session?.kind === 'student' ? session.student.student_id : '',
+    session?.kind === 'admin' ? session.admin.session_token : '',
+    refreshFromSupabase
+  ]);
 
   const currentAdminRole: AdminRole | null =
     session?.kind === 'admin' ? session.admin.role : null;
@@ -293,6 +326,9 @@ export default function App() {
       await operation();
       setSyncError(null);
     } catch (err) {
+      if (isSessionExpiredError(err)) {
+        setSession(null);
+      }
       const msg = err instanceof Error ? err.message : String(err);
       setSyncError(msg);
       if (propagateError) throw err;
@@ -300,10 +336,10 @@ export default function App() {
   };
 
   const handlePushSeedToSupabase = async () => {
-    await pushFullDatabaseToSupabase(db);
+    await pushFullDatabaseToSupabase(db, adminToken);
     setSupabaseStatus('connected');
     setSyncError(null);
-    await refreshFromSupabase();
+    await refreshFromSupabase(adminToken);
   };
 
   const handleImportSnapshot = async (snapshot: ExamDatabase) => {
@@ -313,14 +349,14 @@ export default function App() {
     };
     setDb(normalized);
     if (supabaseStatus === 'connected' || supabaseStatus === 'empty') {
-      await pushFullDatabaseToSupabase(normalized);
+      await pushFullDatabaseToSupabase(normalized, adminToken);
       setSupabaseStatus('connected');
     }
   };
 
   const handleUpdateConfig = async (config: ExamConfig) => {
     setDb((prev) => ({ ...prev, config }));
-    await syncRemote(() => upsertExamConfigSupabase(config));
+    await syncRemote(() => upsertExamConfigSupabase(config, adminToken));
   };
 
   const handleSaveQuestion = async (question: QuestionItem) => {
@@ -328,7 +364,7 @@ export default function App() {
       ...prev,
       questions: { ...prev.questions, [question.question_id]: question }
     }));
-    await syncRemote(() => upsertQuestionWithRubricsSupabase(question));
+    await syncRemote(() => upsertQuestionWithRubricsSupabase(question, adminToken));
   };
 
   const handleBulkSaveQuestions = async (questions: QuestionItem[]) => {
@@ -339,7 +375,7 @@ export default function App() {
       });
       return { ...prev, questions: nextQ };
     });
-    await syncRemote(() => bulkUpsertQuestionsWithRubricsSupabase(questions));
+    await syncRemote(() => bulkUpsertQuestionsWithRubricsSupabase(questions, adminToken));
   };
 
   const handleDeleteQuestion = async (questionId: string) => {
@@ -348,7 +384,7 @@ export default function App() {
       delete nextQ[questionId];
       return { ...prev, questions: nextQ };
     });
-    await syncRemote(() => deleteQuestionSupabase(questionId));
+    await syncRemote(() => deleteQuestionSupabase(questionId, adminToken));
   };
 
   const handleSaveStudent = async (student: StudentRecord) => {
@@ -356,7 +392,7 @@ export default function App() {
       ...prev,
       students: { ...prev.students, [student.student_id]: student }
     }));
-    await syncRemote(() => upsertStudentsSupabase([student]));
+    await syncRemote(() => upsertStudentsSupabase([student], adminToken));
   };
 
   const handleBulkImportStudents = async (students: StudentRecord[]) => {
@@ -367,7 +403,7 @@ export default function App() {
       });
       return { ...prev, students: updatedMap };
     });
-    await syncRemote(() => upsertStudentsSupabase(students));
+    await syncRemote(() => upsertStudentsSupabase(students, adminToken));
   };
 
   const handleResetSubmission = async (studentId: string) => {
@@ -381,7 +417,7 @@ export default function App() {
       ...prev,
       responses: { ...prev.responses, [studentId]: reopened }
     }));
-    await syncRemote(() => resetSubmissionSupabase(studentId, existing.exam_code));
+    await syncRemote(() => resetSubmissionSupabase(studentId, existing.exam_code, adminToken));
   };
 
   const handleSaveGrade = async (grade: QuestionGrade) => {
@@ -399,7 +435,7 @@ export default function App() {
         }
       }
     }));
-    await syncRemote(() => upsertGradeSupabase(enrichedGrade));
+    await syncRemote(() => upsertGradeSupabase(enrichedGrade, adminToken));
   };
 
   const handleBulkSaveGrades = async (grades: QuestionGrade[]) => {
@@ -415,7 +451,7 @@ export default function App() {
       });
       return { ...prev, grades: nextGrades };
     });
-    await syncRemote(() => bulkUpsertGradesSupabase(enriched));
+    await syncRemote(() => bulkUpsertGradesSupabase(enriched, adminToken));
   };
 
   const handleSaveAdminUser = async (user: AdminUser) => {
@@ -423,7 +459,7 @@ export default function App() {
       ...prev,
       admin_users: { ...prev.admin_users, [user.user_id]: user }
     }));
-    await syncRemote(() => upsertAdminUserSupabase(user));
+    await syncRemote(() => upsertAdminUserSupabase(user, adminToken));
   };
 
   const handleDeleteAdminUser = async (userId: string) => {
@@ -432,13 +468,14 @@ export default function App() {
       delete nextAdmins[userId];
       return { ...prev, admin_users: nextAdmins };
     });
-    await syncRemote(() => deleteAdminUserSupabase(userId));
+    await syncRemote(() => deleteAdminUserSupabase(userId, adminToken));
   };
 
-  // Simpan hanya butir soal yang berubah (dirty-only save) + propagasi error agar offline queue bisa retry otomatis
+  // Simpan hanya butir soal yang berubah (dirty-only save) + catatan fokus + propagasi error untuk offline queue
   const handleSaveStudentDraft = async (
     student: StudentRecord,
-    changedAnswers: Record<string, string>
+    changedAnswers: Record<string, string>,
+    focusViolations: number
   ) => {
     const existingResp = db.responses?.[student.student_id];
     const mergedAnswers = {
@@ -453,6 +490,7 @@ export default function App() {
       status: 'IN_PROGRESS' as const,
       started_at: existingResp?.started_at || new Date().toISOString(),
       draft_updated_at: new Date().toISOString(),
+      focus_violations: Math.max(existingResp?.focus_violations || 0, focusViolations),
       answers: mergedAnswers
     };
     setDb((prev) => ({
@@ -460,30 +498,35 @@ export default function App() {
       responses: { ...prev.responses, [student.student_id]: payload }
     }));
     await syncRemote(
-      () => upsertStudentAnswersSupabase(student, changedAnswers, 'IN_PROGRESS'),
+      () => upsertStudentAnswersSupabase(student, changedAnswers, 'IN_PROGRESS', focusViolations),
       true
     );
   };
 
   const handleSubmitStudentExam = async (
     student: StudentRecord,
-    answers: Record<string, string>
+    answers: Record<string, string>,
+    focusViolations: number
   ) => {
+    const existingResp = db.responses?.[student.student_id];
     const payload = {
       student_id: student.student_id,
       full_name: student.full_name,
       class_name: student.class_name,
       exam_code: student.exam_code,
       status: 'SUBMITTED' as const,
-      started_at: db.responses?.[student.student_id]?.started_at || new Date().toISOString(),
+      started_at: existingResp?.started_at || new Date().toISOString(),
       submitted_at: new Date().toISOString(),
+      focus_violations: Math.max(existingResp?.focus_violations || 0, focusViolations),
       answers
     };
     setDb((prev) => ({
       ...prev,
       responses: { ...prev.responses, [student.student_id]: payload }
     }));
-    await syncRemote(() => upsertStudentAnswersSupabase(student, answers, 'SUBMITTED'));
+    await syncRemote(() =>
+      upsertStudentAnswersSupabase(student, answers, 'SUBMITTED', focusViolations)
+    );
   };
 
   const handleLogout = () => {
@@ -493,7 +536,7 @@ export default function App() {
     setSession(null);
   };
 
-  // Gate 1: Belum Login -> Tampilkan Gerbang Autentikasi Berbasis Peran
+  // Gate 1: Belum Login -> Tampilkan Gerbang Autentikasi (Siswa di /, Pengelola di ?portal=pengelola)
   if (!session) {
     return (
       <LoginPortal
@@ -800,8 +843,9 @@ export default function App() {
               <SupabaseSyncHub
                 db={db}
                 supabaseStatus={supabaseStatus}
+                hardenedRpcActive={hardenedRpcActive}
                 syncError={syncError}
-                onRefreshFromSupabase={refreshFromSupabase}
+                onRefreshFromSupabase={() => refreshFromSupabase(adminToken)}
                 onPushSeedToSupabase={handlePushSeedToSupabase}
                 onImportJsonSnapshot={handleImportSnapshot}
               />
