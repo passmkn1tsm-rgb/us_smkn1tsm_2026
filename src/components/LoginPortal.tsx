@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ShieldCheck, GraduationCap, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { AdminUser, ExamConfig, ExamDatabase, StudentRecord } from '../types/exam';
 import {
@@ -40,6 +40,19 @@ export const LoginPortal: React.FC<LoginPortalProps> = ({
   const [isAdminPortal, setIsAdminPortal] = useState<boolean>(() =>
     detectPengelolaPortalFromUrl()
   );
+
+  useEffect(() => {
+    const syncPortalFromUrl = () => {
+      setIsAdminPortal(detectPengelolaPortalFromUrl());
+      setErrorMsg(null);
+    };
+    window.addEventListener('hashchange', syncPortalFromUrl);
+    window.addEventListener('popstate', syncPortalFromUrl);
+    return () => {
+      window.removeEventListener('hashchange', syncPortalFromUrl);
+      window.removeEventListener('popstate', syncPortalFromUrl);
+    };
+  }, []);
 
   // Student form
   const [studentId, setStudentId] = useState('');
